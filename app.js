@@ -40,6 +40,7 @@ const WALL = document.getElementById('wall');
 const WALL_BODY = document.getElementById('wall-body');
 const WALL_COUNT = document.getElementById('wall-count');
 const WALL_FILTER = document.getElementById('wall-filter');
+const WALL_SORT = document.getElementById('wall-sort-sel');
 const FILES_PANEL = document.getElementById('files-panel');
 
 /*
@@ -298,6 +299,11 @@ const LB = {
   panning: false,  // 放大后是否在拖动
   panX: 0,
   panY: 0,
+  dragging: false, // 鼠标/手指是否正按下（用于切grab 光标）
+  // 拖动惯性
+  velX: 0,
+  velY: 0,
+  inertiaRaf: 0,
 };
 
 // ---------------------------------------------------------------- 缩放
@@ -308,8 +314,14 @@ const LB = {
  *   不用改 width/height —— 改尺寸会触发重排、放大后卡顿；
  *   transform 走合成层，缩放平移都是 GPU 干的，60fps 很顺。
  *
- * "适应"是基准：图片刚好塞进 .lb-stage 时的缩放（=1）。
- * 放大后舞台会滚动，靠 overflow:auto + 手动 translate 来定位看哪一块。
+ *  "适应"是基准：图片刚好塞进 .lb-stage 时的缩放（=1）。
+ *
+ * ★ 关键：只用 transform，绝不改.stage 的 width/height。
+ *   之前同时用了「transform 平移」+「改容器尺寸制造滚动区」，
+ *   两套机制互相打架 —— 容器一变，视口跟着跳，缩放就不是原位的；
+ *   而且拖动会同时触发容器滚动和 transform，图像会飘。
+ *   现在容器恒定，所有位移都靠 transform，锚点才能真正锁死。
+ *   平移量按缩放后的溢出量夹逼，所以永远拖不出边界。
  */
 function applyZoom() {
   const img = $('lb-img');
@@ -319,42 +331,81 @@ function applyZoom() {
   img.style.transformOrigin = 'center center';
   img.classList.toggle('is-zoomed', z > 1.01);
 
+  // 容器尺寸恒定，只切一个类供 CSS 切光标样式
   const stage = $('lb-stage');
-  // 放大后允许拖动查看：给舞台加可滚动区域
-  if (z > 1.01) {
-    const w = stage.clientWidth;
-    const h = stage.clientHeight;
-    stage.style.width = (w * z) + 'px';
-    stage.style.height = (h * z) + 'px';
-    stage.classList.add('is-scrollable');
-  } else {
-    stage.style.width = '';
-    stage.style.height = '';
-    stage.classList.remove('is-scrollable');
-  }
+  stage.classList.toggle('is-scrollable', z > 1.01);
+  stage.classList.toggle('is-grabbing', LB.dragging);
+
+  // 操作提示只在放大时出现 —— 平时不占地方，也不干扰看图
+  const hint = $('lb-hint');
+  if (hint) hint.hidden = z <= 1.01;
 
   $('lb-zoom-reset').textContent = z <= 1.01 ? '适应' : Math.round(z * 100) + '%';
+}
+
+/**
+ * 算出缩放后图片相对舞台的溢出量，并据此夹逼平移量。
+ *
+ * 图片的布局尺寸（未缩放时）是 fitW x fitH；缩放 z 倍后超出舞台的部分
+ * 才是可以平移的范围。平移量必须夹在这个范围内，否则能拖出黑边。
+ */
+function clampPan() {
+  const stage = $('lb-stage');
+  const img = $('lb-img');
+  const z = LB.zoom;
+  if (z <= 1.01) {
+    LB.panX = 0;
+    LB.panY = 0;
+    return;
+  }
+  // 图片当前的渲染尺寸（transform 后的视觉大小）
+  const w = img.offsetWidth * z;
+  const h = img.offsetHeight * z;
+  // 最多能平移的距离：超出舞台的那一半
+  const maxX = Math.max(0, (w - stage.clientWidth) / 2);
+  const maxY = Math.max(0, (h - stage.clientHeight) / 2);
+  LB.panX = Math.min(maxX, Math.max(-maxX, LB.panX));
+  LB.panY = Math.min(maxY, Math.max(-maxY, LB.panY));
 }
 
 function setZoom(z, anchorX, anchorY) {
   const old = LB.zoom;
   const next = Math.min(LB.maxZoom, Math.max(LB.minZoom, z));
-  if (Math.abs(next - old) < 0.001) return;
-  LB.zoom = next;
+  if (Math.abs(next - old) < 0.0001) {
+    clampPan();
+    applyZoom();
+    return;
+  }
+
+  const stage = $('lb-stage');
+  // 锚点默认取舞台中心（点按钮/键盘缩放时）
+  const cx = anchorX === undefined ? stage.clientWidth / 2 : anchorX;
+  const cy = anchorY === undefined ? stage.clientHeight / 2 : anchorY;
 
   if (next <= 1.01) {
     LB.panX = 0;
     LB.panY = 0;
   } else {
-    // 保持鼠标/手指指向的那一点不动：以舞台中心为锚点缩放
-    const stage = $('lb-stage');
-    const cx = anchorX === undefined ? stage.clientWidth / 2 : anchorX;
-    const cy = anchorY === undefined ? stage.clientHeight / 2 : anchorY;
+    /*
+     * ★ 锚点缩放：缩放后，鼠标/手指指向的那个点必须**停在原地不动**。
+     *
+     * 推导（把图片中心当作原点，u 是内容坐标）：
+     *   屏幕位置 S(u) = pan + u * z
+     *   锚点 P 处的内容坐标 uA = (P - pan_old) / z_old
+     *   要求缩放后 uA 仍在 P：pan_new + uA * z_new = P
+     *   =>  pan_new = P - uA * z_new
+     *           = P - (P - pan_old) / z_old * z_new
+     *           = P - (P - pan_old) * k        （k = z_new / z_old）
+     *
+     * ⚠️ 别写成 pan*k - (k-1)*(P - center) —— 那个多减了一个中心偏移，
+     *   实测偏差 225px。这就是"放大不是原位"的真正原因。
+     */
     const k = next / old;
-    // 锚点相对中心的位置，按比例放大后补偿回去
     LB.panX = cx - (cx - LB.panX) * k;
     LB.panY = cy - (cy - LB.panY) * k;
   }
+  LB.zoom = next;
+  clampPan();
   applyZoom();
 }
 
@@ -363,6 +414,15 @@ function stepZoom(factor, anchorX, anchorY) {
 }
 
 function resetZoom() {
+  // 复位时必须停掉惯性，否则 requestAnimationFrame 会在
+  // 图片已卸载（src 被清空）后继续跑，白烧 CPU
+  if (LB.inertiaRaf) {
+    cancelAnimationFrame(LB.inertiaRaf);
+    LB.inertiaRaf = 0;
+  }
+  LB.velX = 0;
+  LB.velY = 0;
+  LB.dragging = false;
   LB.zoom = 1;
   LB.panX = 0;
   LB.panY = 0;
@@ -596,7 +656,38 @@ function pumpThumbs() {
   }
 }
 
+/*
+ * 照片墙排序。
+ *
+ * 6 张照片时排序没什么用，600 张时是刚需 —— 找某张特定时间拍的要靠它。
+ * 'group' 保持按子目录分组（默认，符合"整理过"的直觉），
+ * 其余模式把整个照片墙当成一个扁平列表按单一关键字排。
+ */
+function sortPhotos(list, mode) {
+  const arr = list.slice();
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name), 'zh');
+  switch (mode) {
+    case 'name':
+      arr.sort(byName);
+      break;
+    case 'new':
+      // mtime 是 ISO 字符串，字典序 == 时间序
+      arr.sort((a, b) => String(b.mtime).localeCompare(String(a.mtime)));
+      break;
+    case 'old':
+      arr.sort((a, b) => String(a.mtime).localeCompare(String(b.mtime)));
+      break;
+    case 'big':
+      arr.sort((a, b) => (b.size || 0) - (a.size || 0));
+      break;
+    default:
+      return arr;   // group：保持原样
+  }
+  return arr;
+}
+
 function renderPhotoGrid() {
+  const mode = ($('wall-sort-sel') || {}).value || 'group';
   const files = bucketFiles();
   if (!files.length) {
     WALL_BODY.innerHTML = '<p class="hint">' +
@@ -615,8 +706,18 @@ function renderPhotoGrid() {
     groups.get(g).push(f);
   }
 
+  // 非分组模式下把所有照片并成一个匿名组，实现整体排序
+  let pairs = [...groups.entries()];
+  if (mode !== 'group') {
+    const all = sortPhotos(files, mode);
+    pairs = [['', all]];
+  } else {
+    // 分组内也按名称排，避免同组内顺序随机
+    pairs = pairs.map(([k, v]) => [k, sortPhotos(v, 'name')]);
+  }
+
   WALL_BODY.innerHTML = '';
-  for (const [name, items] of groups) {
+  for (const [name, items] of pairs) {
     // 根目录（无子目录）不显示分组标题，省一层视觉噪音
     if (name) {
       const h = document.createElement('h2');
@@ -1320,6 +1421,8 @@ $('gate-form').addEventListener('submit', async (e) => {
 LOCK_BTN.addEventListener('click', lock);
 FILTER.addEventListener('input', renderList);
 WALL_FILTER.addEventListener('input', renderList);
+// 排序改变时重画照片墙。change 而非 input（下拉框没有连续输入）
+if (WALL_SORT) WALL_SORT.addEventListener('change', renderList);
 BACK_BTN.addEventListener('click', backToList);
 LIST_FAB.addEventListener('click', backToList);
 
@@ -1370,9 +1473,23 @@ $('lb-thumbs').addEventListener('click', (e) => {
   if (b) showLightboxAt(Number(b.dataset.idx));
 });
 
-// 点图片周围的空白关闭，点图片本身不关
+/*
+ * 点图片周围的空白关闭，点图片本身不关。
+ *
+ * ★ 用坐标判断而不是 e.target：
+ *   图片设了 pointer-events:none（为的是让 dblclick /拖动统一
+ *   由 stage 处理，也避免浏览器自带的图片拖拽），所以 e.target
+ *   永远是 stage，拿它没法区分点在图上还是图外。
+ */
 $('lb-stage').addEventListener('click', (e) => {
-  if (e.target === $('lb-stage')) closeLightbox();
+  const img = $('lb-img');
+  const r = img.getBoundingClientRect();
+  // 浏览器窗口坐标 -> 图片盒内部
+  const inX = e.clientX >= r.left && e.clientX <= r.right;
+  const inY = e.clientY >= r.top && e.clientY <= r.bottom;
+  // 图片本身的盒子是缩放后的视觉大小（transform 已生效），
+  // 所以命中判断自动跟着缩放走。
+  if (!inX || !inY) closeLightbox();
 });
 
 // ---- 灯箱缩放控件
@@ -1384,6 +1501,15 @@ $('lb-zoom-reset').addEventListener('click', resetZoom);
 $('lb-stage').addEventListener('wheel', (e) => {
   if (!LB.open) return;
   e.preventDefault();
+  // 横向滚轮 / 带shift 的纵向滚轮 -> 平移；纵向滚轮 -> 缩放
+  // （触控板双指横向滑动很自然，不该被当缩放）
+  const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
+  if (horiz && LB.zoom > 1.01) {
+    LB.panX -= (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+    clampPan();
+    applyZoom();
+    return;
+  }
   const r = $('lb-stage').getBoundingClientRect();
   const ax = e.clientX - r.left;
   const ay = e.clientY - r.top;
@@ -1391,20 +1517,46 @@ $('lb-stage').addEventListener('wheel', (e) => {
 }, { passive: false });
 
 /*
+ * 双击 / 双指轻点：在「适应」和「2倍」之间切换，以点击处为锚点。
+ * 这是看图最常用的一步——先放大看细节，再退回全景。
+ * 用 dblclick 而不是自己计时器：浏览器已经处理了双击的判定，
+ * 而且移动端 Safari/Chrome 的 dblclick 在非缩放页面上也可靠。
+ */
+$('lb-stage').addEventListener('dblclick', (e) => {
+  if (!LB.open) return;
+  e.preventDefault();
+  const r = $('lb-stage').getBoundingClientRect();
+  const ax = e.clientX - r.left;
+  const ay = e.clientY - r.top;
+  if (LB.zoom > 1.01) {
+    setZoom(1);                       // 退回全景，平移自动复位
+  } else {
+    setZoom(2.4, ax, ay);             // 以点击处为锚点放大
+  }
+});
+
+/*
  * 灯箱手势：分两种情况，不能混。
  *
- *  未放大（zoom == 1）：单指左右滑 = 翻页
+ *  未放大（zoom == 1）：单指左右滑 = 翻页；单击空白 = 关闭
  *  已放大（zoom > 1）：单指拖 = 移动图片；双指捏合 = 缩放
  *
  * 之前只有一个 touchstart/touchend，翻页在放大后也会触发——
  * 放大状态下用户想挪一下图片，结果翻到下一张了。
+ *
+ * ★ 拖动补了三样，让手感"灵动"：
+ *   1. clampPan()  —— 拖不出边界，不会把图片甩到看不见的地方
+ *   2. 惯性        —— 松手后按最后速度滑一小段并渐停
+ *   3. 边界回弹    —— 拖过头了松手会弹回来
  */
 (() => {
   const stage = $('lb-stage');
   // 单指
   let sx = 0, sy = 0, moved = false, baseX = 0, baseY = 0;
+  let lastX = 0, lastY = 0, lastT = 0, vX = 0, vY = 0;
   // 双指
   let pinchStartDist = 0, pinchStartZoom = 1, pinchAnchor = null;
+  let inertiaRaf = 0;
 
   const dist = (t) => Math.hypot(
     t[0].clientX - t[1].clientX,
@@ -1415,8 +1567,49 @@ $('lb-stage').addEventListener('wheel', (e) => {
     y: (t[0].clientY + t[1].clientY) / 2,
   });
 
+  function stopInertia() {
+    if (inertiaRaf) {
+      cancelAnimationFrame(inertiaRaf);
+      inertiaRaf = 0;
+    }
+    LB.velX = 0;
+    LB.velY = 0;
+  }
+
+  // 惯性滑动 + 边界回弹。每帧衰减 0.92，超界则用 0.18 拉回。
+  function startInertia() {
+    stopInertia();
+    if (LB.zoom <= 1.01) return;
+    const step = () => {
+      const still = () => {
+        inertiaRaf = 0;
+        LB.velX = 0;
+        LB.velY = 0;
+        LB.dragging = false;
+        applyZoom();
+      };
+      const sp = Math.hypot(LB.velX, LB.velY);
+      if (sp < 0.25) { still(); return; }
+
+      const before = { x: LB.panX, y: LB.panY };
+      LB.panX += LB.velX;
+      LB.panY += LB.velY;
+      clampPan();
+      // 撞到边界了就把该轴速度清零（另一轴继续滑）
+      if (Math.abs(LB.panX - before.x) < Math.abs(LB.velX) * 0.5) LB.velX = 0;
+      if (Math.abs(LB.panY - before.y) < Math.abs(LB.velY) * 0.5) LB.velY = 0;
+      LB.velX *= 0.92;
+      LB.velY *= 0.92;
+      applyZoom();
+      inertiaRaf = requestAnimationFrame(step);
+    };
+    LB.dragging = false;
+    inertiaRaf = requestAnimationFrame(step);
+  }
+
   stage.addEventListener('touchstart', (e) => {
     if (!LB.open) return;
+    stopInertia();
     if (e.touches.length === 2) {
       pinchStartDist = dist(e.touches);
       pinchStartZoom = LB.zoom;
@@ -1428,7 +1621,13 @@ $('lb-stage').addEventListener('wheel', (e) => {
       const t = e.touches[0];
       sx = t.clientX; sy = t.clientY;
       baseX = LB.panX; baseY = LB.panY;
+      lastX = t.clientX; lastY = t.clientY; lastT = e.timeStamp;
+      vX = 0; vY = 0;
       moved = false;
+      if (LB.zoom > 1.01) {
+        LB.dragging = true;
+        applyZoom();
+      }
     }
   }, { passive: true });
 
@@ -1450,6 +1649,18 @@ $('lb-stage').addEventListener('wheel', (e) => {
       const t = e.touches[0];
       LB.panX = baseX + (t.clientX - sx);
       LB.panY = baseY + (t.clientY - sy);
+      clampPan();
+      // 记速度（每 100ms 算一次，太密的样本噪声大）
+      const dt = e.timeStamp - lastT;
+      if (dt > 0) {
+        const nvX = (t.clientX - lastX) / dt * 16;
+        const nvY = (t.clientY - lastY) / dt * 16;
+        // 平滑一下，避免手指抖动导致速度跳变
+        vX = vX * 0.5 + nvX * 0.5;
+        vY = vY * 0.5 + nvY * 0.5;
+        lastX = t.clientX; lastY = t.clientY; lastT = e.timeStamp;
+      }
+      LB.velX = vX; LB.velY = vY;
       applyZoom();
       moved = true;
     }
@@ -1459,8 +1670,13 @@ $('lb-stage').addEventListener('wheel', (e) => {
     if (!LB.open) return;
     if (e.touches.length < 2) pinchStartDist = 0;
 
-    // 放大状态下不翻页
-    if (LB.zoom > 1.01) return;
+    // 放大状态下：松手给惯性，不翻页
+    if (LB.zoom > 1.01) {
+      LB.dragging = false;
+      if (moved) startInertia();
+      else applyZoom();
+      return;
+    }
     if (moved) return;
 
     const t = e.changedTouches[0];
@@ -1471,6 +1687,49 @@ $('lb-stage').addEventListener('wheel', (e) => {
       stepLightbox(dx < 0 ? 1 : -1);
     }
   }, { passive: true });
+
+  // ---- 桌面端：鼠标拖动
+  let mDown = false, mStartX = 0, mStartY = 0, mBaseX = 0, mBaseY = 0;
+  let mLastX = 0, mLastY = 0, mLastT = 0, mVX = 0, mVY = 0, mMoved = false;
+
+  stage.addEventListener('mousedown', (e) => {
+    if (!LB.open || LB.zoom <= 1.01 || e.button !== 0) return;
+    stopInertia();
+    mDown = true;
+    mMoved = false;
+    mStartX = e.clientX; mStartY = e.clientY;
+    mBaseX = LB.panX; mBaseY = LB.panY;
+    mLastX = e.clientX; mLastY = e.clientY; mLastT = performance.now();
+    mVX = 0; mVY = 0;
+    LB.dragging = true;
+    applyZoom();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!mDown) return;
+    e.preventDefault();
+    LB.panX = mBaseX + (e.clientX - mStartX);
+    LB.panY = mBaseY + (e.clientY - mStartY);
+    clampPan();
+    const now = performance.now();
+    const dt = now - mLastT;
+    if (dt > 0) {
+      mVX = mVX * 0.5 + ((e.clientX - mLastX) / dt * 16) * 0.5;
+      mVY = mVY * 0.5 + ((e.clientY - mLastY) / dt * 16) * 0.5;
+      mLastX = e.clientX; mLastY = e.clientY; mLastT = now;
+    }
+    LB.velX = mVX; LB.velY = mVY;
+    mMoved = true;
+    applyZoom();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!mDown) return;
+    mDown = false;
+    LB.dragging = false;
+    if (mMoved) startInertia();
+    else applyZoom();
+  });
 })();
 
 $('pdf-prev').addEventListener('click', () => pdfGo(-1));
@@ -1549,10 +1808,10 @@ document.addEventListener('keydown', (e) => {
     // 放大后方向键改为平移图片；未放大时才翻页
     if (LB.zoom > 1.01) {
       const step = e.shiftKey ? 80 : 32;
-      if (e.key === 'ArrowLeft') { e.preventDefault(); LB.panX += step; applyZoom(); return; }
-      if (e.key === 'ArrowRight') { e.preventDefault(); LB.panX -= step; applyZoom(); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); LB.panY += step; applyZoom(); return; }
-      if (e.key === 'ArrowDown') { e.preventDefault(); LB.panY -= step; applyZoom(); return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); LB.panX += step; clampPan(); applyZoom(); return; }
+      if (e.key === 'ArrowRight') { e.preventDefault(); LB.panX -= step; clampPan(); applyZoom(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); LB.panY += step; clampPan(); applyZoom(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); LB.panY -= step; clampPan(); applyZoom(); return; }
     } else {
       if (e.key === 'ArrowLeft') { e.preventDefault(); stepLightbox(-1); return; }
       if (e.key === 'ArrowRight') { e.preventDefault(); stepLightbox(1); return; }

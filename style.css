@@ -91,11 +91,44 @@ body.is-wall .wall-wrap {
 @media (max-width: 600px)  { .wall-wrap { --cell-h: 104px; } }
 .wall-head {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 14px;
   flex-shrink: 0;      /* 筛选栏那行不要被压缩 */
   width: 100%;
+}
+/* 筛选框 + 排序下拉并排靠右 */
+.wall-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+.wall-sort { display: flex; }
+.wall-sort-sel {
+  padding: 7px 8px;
+  /* 16px 防止 iOS 聚焦缩放 */
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+  cursor: pointer;
+}
+.wall-sort-sel:focus { border-color: var(--accent); }
+
+/* 视觉隐藏但可被读屏软件读到 */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /*
@@ -264,6 +297,18 @@ body.is-wall .wall-wrap {
   padding: 6px 52px;
   position: relative;
   overflow: hidden;
+  /*
+   * ★ 关键：告诉浏览器"这个区域的单指手势我自己处理"。
+   *   不写的话移动端浏览器会把拖动当成页面滚动/双击缩放，
+   *   图片就拖不动 —— 表现为"放大后无法自由拖动"。
+   *   - none：完全接管（我们要自己做捏合缩放）
+   *   - pinch-zoom：仍然允许页面级双指缩放（无障碍需要）
+   */
+  touch-action: none;
+  -ms-touch-action: none;
+  /* 拖动时不要选中文字，否则会出现蓝色高亮块 */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .lb-stage img {
   max-width: 100%;
@@ -271,18 +316,20 @@ body.is-wall .wall-wrap {
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
-  /* 缩放走 transform：走合成层，缩放平移都是 GPU 的，不卡 */
-  transition: transform 0.12s ease-out;
+  /* 不用 transition：拖动时 120ms 延迟会让"跟手"完全失效。
+     缩放平滑由 wheel 的连续事件天然提供，不需要补间。 */
+  transition: none;
   cursor: zoom-in;
+  will-change: transform;
+  /* 关键：让图片本身不响应双击缩放，统一由 stage 的 dblclick 处理，
+     否则浏览器自带的 zoom 会和我们的锚点缩放打架。 */
+  pointer-events: none;
 }
-.lb-stage img.is-zoomed {
-  cursor: grab;
-  transition: none;      /* 拖动时不要有过渡延迟，手感跟手 */
-}
-.lb-stage img.is-zoomed:active { cursor: grabbing; }
-
-/* 放大后舞台变可滚动，滚轮/拖动都能看细节 */
-.lb-stage.is-scrollable { overflow: auto; }
+/* 光标挂在 stage 上：放大后图片会超出图片本身的盒子，
+   挂在 img 上会出现"指针在图片外却是 default"的怪现象。 */
+.lb-stage.is-scrollable { cursor: grab; overflow: hidden; }
+.lb-stage.is-grabbing,
+.lb-stage.is-scrollable:active { cursor: grabbing; }
 
 .lb-stage.is-loading::after {
   content: "解密中…";
@@ -293,8 +340,8 @@ body.is-wall .wall-wrap {
 
 /*
  * 翻页按钮固定在可视区左右边缘。
- * 舞台放大后会变宽（is-scrollable），按钮若跟着舞台走就会跑出屏幕，
- * 所以用 fixed 定位：top 相对视口、left/right 贴视口边。
+ * 用 fixed 定位：放大后图片会超出舞台（靠 transform 平移），
+ * 按钮若跟着舞台走就会跑出屏幕，所以 top 相对视口、left/right 贴视口边。
  */
 .lb-nav {
   position: fixed;
@@ -314,6 +361,45 @@ body.is-wall .wall-wrap {
 .lb-nav[hidden] { display: none; }
 .lb-prev { left: 6px; }
 .lb-next { right: 6px; }
+
+/*
+ * 操作提示条：只在放大时出现。
+ * 位置放在底部缩略图条之上，用半透明胶囊样式，不抢图片的注意力。
+ */
+.lb-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 14px;
+  padding: 6px 14px;
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(255,255,255,0.82);
+  background: rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  white-space: nowrap;
+  pointer-events: none;   /* 不挡任何点击 */
+  z-index: 3;
+  animation: hint-in 0.25s ease-out;
+}
+.lb-hint span { display: inline-flex; align-items: center; }
+.lb-hint span + span::before {
+  content: "·";
+  margin-right: 14px;
+  color: rgba(255,255,255,0.35);
+}
+@keyframes hint-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lb-hint { animation: none; }
+}
 
 .lb-thumbs {
   display: flex;
@@ -343,6 +429,15 @@ body.is-wall .wall-wrap {
   .lb-nav { width: 38px; height: 60px; font-size: 24px; }
   .lb-prev { left: 2px; }
   .lb-next { right: 2px; }
+
+  /*
+   * 手机上没有滚轮，双击在移动端浏览器上行为也不统一，
+   * 所以只留「拖动」和「双指缩放」两条真正能用的。
+   */
+  .lb-hint { gap: 10px; font-size: 11px; padding: 5px 12px; bottom: 6px; }
+  .lb-hint .hint-wheel,
+  .lb-hint .hint-dbl,
+  .lb-hint .hint-arrow { display: none; }
 }
 
 /* ---------------------------------------------------------- 密码界面 */
@@ -626,8 +721,30 @@ input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3p
   text-align: center;
   color: var(--fg-muted);
 }
-.empty-main { margin: 0 0 6px; font-size: 14px; }
+.empty-mark {
+  color: var(--fg-faint);
+  opacity: 0.55;
+  margin-bottom: 14px;
+}
+.empty-main { margin: 0 0 8px; font-size: 14px; }
 .empty-sub { margin: 0; font-size: 12px; color: var(--fg-faint); }
+
+/* 键盘键帽：提示快捷键时用，比文字更直观 */
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  vertical-align: 1px;
+}
 
 .loading {
   position: absolute;
