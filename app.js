@@ -20,6 +20,61 @@ const VAULT = document.getElementById('vault');
 const PWD = document.getElementById('pwd');
 const UNLOCK_BTN = document.getElementById('unlock-btn');
 const GATE_MSG = document.getElementById('gate-msg');
+
+/*
+ * ---- 记住密码（仅本次浏览器会话）
+ *
+ * ★ 为什么用 sessionStorage 而不是 localStorage：
+ *   localStorage 会**长期**留在磁盘上，同一台电脑上的任何脚本 / 扩展
+ *   / 别人的脚本都能读走。sessionStorage 随标签页/窗口一起销毁，
+ *   关掉浏览器就没了 —— 便利性够用，风险小得多。
+ *
+ * ★ 安全约束（必须都做到，否则这个功能是危险的）：
+ *   1. 默认**不勾选** —— 不主动问就不会存
+ *   2. 点「上锁」立刻清除 —— 锁了就该忘掉密码
+ *   3. 页面隐藏（切走/最小化）不清除，但要能通过"上锁"按钮销毁
+ *   4. 存之前先确认密码**真的有效** —— 密码错就别存，
+ *      否则下次自动填充一个错的，用户还以为密码坏了
+ *   5. 绝不在 URL / 日志 / 错误信息里出现密码
+ */
+const PW_STORE_KEY = 'vault.pw.session';
+const REMEMBER_PW = document.getElementById('remember-pw');
+const REMEMBER_STATE = document.getElementById('remember-state');
+
+function readRememberedPw() {
+  try {
+    return sessionStorage.getItem(PW_STORE_KEY) || '';
+  } catch (_) {
+    // 隐私模式 / 禁用 storage：安静降级成"没记住"
+    return '';
+  }
+}
+
+function writeRememberedPw(pw) {
+  try {
+    sessionStorage.setItem(PW_STORE_KEY, pw);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function clearRememberedPw() {
+  try {
+    sessionStorage.removeItem(PW_STORE_KEY);
+  } catch (_) {
+    /* 忽略 */
+  }
+}
+
+function syncRememberUI() {
+  if (!REMEMBER_STATE) return;
+  const has = !!readRememberedPw();
+  REMEMBER_STATE.hidden = !has;
+  // 已经记住时把复选框勾上（用户刷新页面仍能解锁）
+  if (REMEMBER_PW) REMEMBER_PW.checked = has;
+}
+
 const GATE_META = document.getElementById('gate-meta');
 const FILTER = document.getElementById('filter');
 const FILE_COUNT = document.getElementById('file-count');
@@ -67,7 +122,21 @@ const S = {
   objectUrls: [],
   idleTimer: null,
   unlocking: false,
-  pdf: { doc: null, page: 1, scale: 1, numPages: 0, task: null },
+  /*
+   * PDF 状态。
+   * pages 记录每页的 DOM 与渲染状态 —— 连续滚动模式下，
+   * 页面是「按需渲染」的：滚到哪渲染哪，离开远了可以回收。
+   */
+  pdf: {
+    doc: null,
+    page: 1,          // 当前视口顶部附近的页码（进度条用）
+    scale: 1,
+    numPages: 0,
+    task: null,
+    pages: new Map(), // pageNo -> { wrap, canvas, ctx, rendered, w, h }
+    renderedUpTo: 0,  // 已经顺序渲染到第几页
+    pending: false,   // 是否有渲染任务在跑（防并发）
+  },
   mammoth: null,
 };
 
@@ -561,10 +630,51 @@ function applyLayout() {
     BACK_BTN.hidden = !viewing;
     VIEW_TITLE.textContent = viewing && S.current ? S.current.name : 'Private Vault';
   } else {
+    // 桌面端：侧栏始终显示，但用户可以手动折叠（阅读长文档时占满宽度更舒服）
     SIDEBAR.classList.remove('is-hidden');
     LIST_FAB.hidden = true;
     BACK_BTN.hidden = true;
     VIEW_TITLE.textContent = 'Private Vault';
+  }
+}
+
+/*
+ * ---- 桌面端侧栏折叠
+ *
+ * 只在宽屏生效。手机上侧栏本来就会在打开文件时收起，
+ * 再加一个折叠按钮反而多余（那里用 LIST_FAB「文件列表」就够了）。
+ *
+ * 状态记在 localStorage —— 每次刷新都要重新点开太烦。
+ */
+const SIDEBAR_KEY = 'pv.sidebar.collapsed';
+
+function loadSidebarPref() {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveSidebarPref(collapsed) {
+  try {
+    localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+  } catch (_) {
+    /* 隐私模式，忽略 */
+  }
+}
+
+function isSidebarCollapsed() {
+  return BODY.classList.contains('sidebar-collapsed');
+}
+
+function setSidebarCollapsed(collapsed) {
+  BODY.classList.toggle('sidebar-collapsed', !!collapsed);
+  saveSidebarPref(!!collapsed);
+  // 宽度变了，PDF 的「适应宽度」要重算
+  if (S.pdf.doc && !$('pdf-view').hidden) {
+    S.pdf.scale = fitScale(S.pdf.doc);
+    repaintAllPdfPages();
   }
 }
 
@@ -873,7 +983,71 @@ async function renderPdf(data) {
   closeFind();
   $('pdf-marks').hidden = true;
   loadMarks();
+  initPdfSeek();
+  // 回到上次读到的那一页（连续滚动下要先建好容器再滚）
+  const pos = loadReadPos('pdf');
   await paintPdf();
+  if (pos && pos.value > 1 && pos.value <= S.pdf.numPages) {
+    scrollToPage(Math.round(pos.value));
+  }
+}
+
+/*
+ * ---- PDF 阅读进度条
+ *
+ * ★ 为什么用 <input type="range"> 而不是自定义 div：
+ *   range 自带键盘操作（←→  Home/End  PageUp/PageDown）、
+ *   读屏软件能识别成 slider、触摸拖动也顺滑。
+ *   自己画div 得把这三样全手写一遍，还容易漏。
+ *
+ * 拖动时的处理有个坑：input 会连续触发 input 事件，
+ * 每一次都重渲染 canvas 会被拖爆。所以：
+ *   -拖动中（isSeeking）只更新气泡数字，不重渲染
+ *   - 松手（change）才真正跳页
+ */
+let isSeeking = false;
+let seekRaf = 0;
+
+function initPdfSeek() {
+  const seek = $('pdf-seek');
+  if (!seek) return;
+  seek.max = String(S.pdf.numPages);
+  seek.value = String(S.pdf.page);
+  seek.disabled = S.pdf.numPages <= 1;
+  renderMarkFlags();
+}
+
+/** 书签在进度条上的小旗标记。 */
+function renderMarkFlags() {
+  const box = $('pdf-progress-flags');
+  if (!box) return;
+  const marks = MARKS.data.slice().sort((a, b) => a.page - b.page);
+  const n = S.pdf.numPages;
+  box.innerHTML = '';
+  if (n <= 1) return;
+  for (const m of marks) {
+    if (!m || typeof m.page !== 'number') continue;
+    if (m.page < 1 || m.page > n) continue;
+    const flag = document.createElement('button');
+    flag.type = 'button';
+    flag.className = 'pdf-flag';
+    flag.style.left = ((m.page - 1) / (n - 1) * 100) + '%';
+    flag.title = '第 ' + m.page + ' 页书签';
+    flag.setAttribute('aria-label', '跳到第 ' + m.page + ' 页书签');
+    flag.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pdfGoTo(m.page);
+    });
+    box.appendChild(flag);
+  }
+}
+
+/** 跳到指定页（拖动松手、点旗、书签列表都走这里）。 */
+async function pdfGoTo(page) {
+  const n = S.pdf.numPages;
+  const target = Math.min(n, Math.max(1, Math.round(page)));
+  if (target === S.pdf.page && S.pdf.pages.has(target)) return;
+  scrollToPage(target);
 }
 
 // 按容器宽度算"刚好放得下"的缩放，手机上体验最好
@@ -887,58 +1061,244 @@ function fitScale(doc) {
   return Math.min(3, Math.max(0.35, avail / base));
 }
 
-async function paintPdf() {
+/*
+ * ================================================================
+ *  PDF 连续滚动阅读
+ * ================================================================
+ *
+ * 之前是「一次一页」：单canvas，render() 一次只画一页。
+ * 用户要的是**固定的框 + 框内滚动**，所以改成：
+ *
+ *   .pdf-stage  flex:1 + overflow:auto  -> 高度固定，页面在它内部滚
+ *   .pdf-pages  纵向 flex，JS 按需注入每页的 <div class="pdf-page">
+ *
+ * ★ 为什么必须「按需渲染」而不是一次性全画：
+ *   300 页的论文，每页 canvas按 2x DPR 算大约 1200x1700，
+ *   一次性全画 = 300 x 8MB = 2.4GB，浏览器直接崩。
+ *   现在只渲染视口附近的页面，远处的回收掉。
+ *
+ * ★ 为什么保留 S.pdf.page 这个「当前页」概念：
+ *   进度条、书签、查找跳转都以它为接口，
+ *   连续滚动下它的含义变成「视口顶部附近的页码」，
+ *   由滚动位置反算。这样上层逻辑不用大改。
+ */
+
+/** 视口上下各留几页做预渲染，滚动时不会白屏。 */
+const PDF_PRE_AHEAD = 2;
+const PDF_PRE_BEHIND = 1;
+
+function pdfPageBox(no) {
+  let rec = S.pdf.pages.get(no);
+  if (rec) return rec;
+  const wrap = document.createElement('div');
+  wrap.className = 'pdf-page';
+  wrap.dataset.page = String(no);
+
+  const canvas = document.createElement('canvas');
+  wrap.appendChild(canvas);
+
+  const label = document.createElement('span');
+  label.className = 'pdf-page-no';
+  label.textContent = String(no);
+  wrap.appendChild(label);
+
+  // 书签旗标（挂在页角，点它跳到该页）
+  if (isMarked(no)) {
+    const flag = document.createElement('button');
+    flag.type = 'button';
+    flag.className = 'pdf-page-flag';
+    flag.title = '第 ' + no + ' 页 · 有书签';
+    flag.setAttribute('aria-label', '跳到第 ' + no + ' 页书签');
+    flag.addEventListener('click', () => scrollToPage(no));
+    wrap.appendChild(flag);
+  }
+
+  const host = $('pdf-pages');
+  // 按页号顺序插入（通常就是追加，乱序跳时才需要比较）
+  let placed = false;
+  for (const child of host.children) {
+    if (Number(child.dataset.page) > no) {
+      host.insertBefore(wrap, child);
+      placed = true;
+      break;
+    }
+  }
+  if (!placed) host.appendChild(wrap);
+
+  rec = { wrap, canvas, ctx: canvas.getContext('2d', { alpha: false }),
+          rendered: false, w: 0, h: 0 };
+  S.pdf.pages.set(no, rec);
+  return rec;
+}
+
+function isMarked(no) {
+  if (!MARKS || !Array.isArray(MARKS.data)) return false;
+  return MARKS.data.some((m) => m && m.page === no);
+}
+
+/** 渲染指定页到它自己的 canvas。已渲染则跳过。 */
+async function renderPdfPage(no) {
   const doc = S.pdf.doc;
   if (!doc) return;
-  const canvas = $('pdf-canvas');
-  const ctx = canvas.getContext('2d', { alpha: false });
-
+  const rec = pdfPageBox(no);
+  if (rec.rendered || rec.rendering) return;
+  rec.rendering = true;
   try {
-    if (S.pdf.task) { try { S.pdf.task.cancel(); } catch (_) {} }
-    showLoading('正在渲染第 ' + S.pdf.page + ' 页…');
-    const page = await doc.getPage(S.pdf.page);
-
-    // 先按逻辑缩放渲染，再乘设备像素比，保证手机屏幕不发虚
+    const page = await doc.getPage(no);
+    // 逻辑缩放 × 设备像素比，保证手机屏不发虚
     const baseViewport = page.getViewport({ scale: S.pdf.scale });
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     const viewport = page.getViewport({ scale: S.pdf.scale * dpr });
 
-    canvas.width = Math.max(1, Math.floor(viewport.width));
-    canvas.height = Math.max(1, Math.floor(viewport.height));
-    canvas.style.width = Math.floor(baseViewport.width) + 'px';
-    canvas.style.height = Math.floor(baseViewport.height) + 'px';
+    rec.canvas.width = Math.max(1, Math.floor(viewport.width));
+    rec.canvas.height = Math.max(1, Math.floor(viewport.height));
+    rec.canvas.style.width = Math.floor(baseViewport.width) + 'px';
+    rec.canvas.style.height = Math.floor(baseViewport.height) + 'px';
+    rec.w = Math.floor(baseViewport.width);
+    rec.h = Math.floor(baseViewport.height);
+    rec.pageObj = page;
 
-    S.pdf.task = page.render({ canvasContext: ctx, viewport });
-    await S.pdf.task.promise;
-    S.pdf.task = null;
-
-    $('pdf-page').textContent = S.pdf.page + ' / ' + S.pdf.numPages;
-    $('pdf-zoom').textContent = Math.round(S.pdf.scale * 100) + '%';
-    hideLoading();
-
-    // 页面重绘后，把查找高亮重新贴到新的 canvas 位置上
-    if (FIND.pageHits.length) {
-      try { await drawHighlights(); } catch (_) { /* 高亮失败不影响阅读 */ }
-    }
+    await page.render({ canvasContext: rec.ctx, viewport }).promise;
+    rec.rendered = true;
   } catch (e) {
-    if (e && e.name === 'RenderingCancelledException') return;
-    hideLoading();
-    throw e;
+    if (e && e.name === 'RenderingCancelledException') {
+      /* 被取消不算失败 */
+    } else {
+      rec.failed = true;
+    }
+  } finally {
+    rec.rendering = false;
   }
 }
+
+/** 丢弃离视口很远的页，省内存。 */
+function recycleFarPages(keepFrom, keepTo) {
+  const margin = PDF_PRE_AHEAD + 2;
+  for (const [no, rec] of S.pdf.pages) {
+    if (no >= keepFrom - margin && no <= keepTo + margin) continue;
+    rec.wrap.remove();
+    S.pdf.pages.delete(no);
+  }
+}
+
+/**
+ * 根据滚动位置算出「当前页」，并渲染/回收附近的页。
+ * 这是滚动事件的唯一入口。
+ */
+let pdfScrollRaf = 0;
+function onPdfScroll() {
+  if (pdfScrollRaf) return;
+  pdfScrollRaf = requestAnimationFrame(() => {
+    pdfScrollRaf = 0;
+    syncPdfFromScroll();
+  });
+}
+
+function syncPdfFromScroll() {
+  const stage = $('pdf-stage');
+  if (!stage || !S.pdf.doc) return;
+
+  // 找到视口顶部最近的那一页
+  const top = stage.scrollTop;
+  const children = $('pdf-pages').children;
+  let current = 1;
+  for (const el of children) {
+    if (el.offsetTop + el.offsetHeight > top + 1) {
+      current = Number(el.dataset.page) || 1;
+      break;
+    }
+    current = Number(el.dataset.page) || current;
+  }
+
+  if (current !== S.pdf.page) {
+    S.pdf.page = current;
+    $('pdf-page').textContent = current + ' / ' + S.pdf.numPages;
+    const seek = $('pdf-seek');
+    if (seek) seek.value = String(current);
+    saveReadPos('pdf', current);
+  }
+
+  // 渲染视口附近的页
+  const from = Math.max(1, current - PDF_PRE_BEHIND);
+  const to = Math.min(S.pdf.numPages, current + PDF_PRE_AHEAD);
+  for (let p = from; p <= to; p++) {
+    if (S.pdf.pages.get(p) && !S.pdf.pages.get(p).rendered) renderPdfPage(p);
+  }
+  recycleFarPages(from, to);
+
+  // 查找高亮要跟着当前页重画（坐标依赖页面位置）
+  if (FIND.pageHits.length) {
+    try { drawHighlights(); } catch (_) { /* 高亮失败不影响阅读 */ }
+  }
+}
+
+/** 滚到指定页。进度条拖动、书签跳转、查找跳结果都走这里。 */
+function scrollToPage(no, smooth = false) {
+  const stage = $('pdf-stage');
+  if (!stage || !S.pdf.doc) return;
+  const target = Math.min(S.pdf.numPages, Math.max(1, Math.round(no)));
+  const rec = pdfPageBox(target);
+  // 先把容器高度撑出来，否则 offsetTop 还是 0
+  if (!rec.rendered) renderPdfPage(target);
+  // 等 DOM 布局完再滚
+  requestAnimationFrame(() => {
+    const r2 = S.pdf.pages.get(target);
+    const y = r2 ? r2.wrap.offsetTop : 0;
+    stage.scrollTo({ top: y, behavior: smooth ? 'smooth' : 'auto' });
+    S.pdf.page = target;
+    $('pdf-page').textContent = target + ' / ' + S.pdf.numPages;
+    const seek = $('pdf-seek');
+    if (seek) seek.value = String(target);
+    saveReadPos('pdf', target);
+    syncPdfFromScroll();
+  });
+}
+
+/** 缩放变化后所有已渲染的页都要重画。 */
+async function repaintAllPdfPages() {
+  if (!S.pdf.doc) return;
+  // 丢掉旧的，重来一遍
+  for (const [, rec] of S.pdf.pages) rec.wrap.remove();
+  S.pdf.pages.clear();
+  const keep = S.pdf.page;
+  await renderPdfPage(keep);
+  syncPdfFromScroll();
+  if (FIND.pageHits.length) {
+    try { await drawHighlights(); } catch (_) { /* 忽略 */ }
+  }
+}
+
+/**
+ * 兼容旧调用点：paintPdf() 现在只是"同步一次"。
+ * 真正的工作在 syncPdfFromScroll() 里按需做。
+ */
+async function paintPdf() {
+  if (!S.pdf.doc) return;
+  $('pdf-zoom').textContent = Math.round(S.pdf.scale * 100) + '%';
+  const from = Math.max(1, S.pdf.page - PDF_PRE_BEHIND);
+  const to = Math.min(S.pdf.numPages, S.pdf.page + PDF_PRE_AHEAD);
+  for (let p = from; p <= to; p++) {
+    if (!S.pdf.pages.get(p)) pdfPageBox(p);
+  }
+  for (let p = from; p <= to; p++) await renderPdfPage(p);
+  $('pdf-page').textContent = S.pdf.page + ' / ' + S.pdf.numPages;
+  hideLoading();
+}
+
 
 async function pdfGo(delta) {
   const next = S.pdf.page + delta;
   if (next < 1 || next > S.pdf.numPages) return;
-  S.pdf.page = next;
-  await paintPdf();
+  // 连续滚动模式下"翻页"= 滚到目标页顶部
+  scrollToPage(next);
 }
 
 async function pdfZoom(factor) {
   const next = Math.min(4, Math.max(0.35, S.pdf.scale * factor));
   if (Math.abs(next - S.pdf.scale) < 0.01) return;
   S.pdf.scale = next;
-  await paintPdf();
+  // 缩放后所有已渲染的页都失效，必须全部重画
+  await repaintAllPdfPages();
 }
 
 // ---------------------------------------------------------------- DOCX（mammoth）
@@ -965,6 +1325,7 @@ async function getMammoth() {
 async function renderDocx(data) {
   const body = $('office-body');
   body.innerHTML = '';
+  buildOfficeToc([]);
 
   let lib;
   try {
@@ -977,8 +1338,26 @@ async function renderDocx(data) {
 
   showLoading('正在解析 Word 文档…');
   try {
+    /*
+     *★ styleMap 把 Word 的"标题 1/2/3"映射成<h1>/<h2>/<h3>。
+     *   不加这个 mammoth 只输出 <p>，几百页文档就完全没有结构，
+     *   既没法生成目录，也没法看出章节层次。
+     *p:heading[style-name='Heading 1'] => h1:fresh
+     *   .. 依此类推
+     */
     const result = await lib.convertToHtml({ arrayBuffer: data.buffer }, {
       includeDefaultStyleMap: true,
+      styleMap: [
+        "p[style-name='Title'] => h1.doc-title:fresh",
+        "p[style-name='Heading 1'] => h1:fresh",
+        "p[style-name='Heading 2'] => h2:fresh",
+        "p[style-name='Heading 3'] => h3:fresh",
+        "p[style-name='Heading 4'] => h4:fresh",
+        "p[style-name='Heading 5'] => h5:fresh",
+        "p[style-name='标题 1'] => h1:fresh",
+        "p[style-name='标题 2'] => h2:fresh",
+        "p[style-name='标题 3'] => h3:fresh",
+      ],
     });
     body.innerHTML = result.value || '<p class="doc-note">（文档是空的）</p>';
 
@@ -994,7 +1373,377 @@ async function renderDocx(data) {
       escapeHtml(String(e && e.message ? e.message : e)) + '</p>';
   }
   hideLoading();
+
+  buildOfficeToc(collectHeadings(body));
+  // 换文档时重置查找/书签状态，载入该文档的 Word 书签
+  closeOfficeFind();
+  $('office-marks').hidden = true;
+  loadOfficeMarks();
+  renderOfficeMarks();
+  restoreOfficePos();
+  initOfficeSeek();
 }
+
+/* ---------------------------------------------------------------- Word 目录 */
+
+/** 从渲染好的 HTML 里抽出标题，生成可点击的目录。 */
+function collectHeadings(body) {
+  const out = [];
+  const nodes = body.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  nodes.forEach((el, i) => {
+    const text = (el.textContent || '').trim();
+    if (!text) return;
+    const id = 'sec-' + i;
+    el.id = id;
+    const level = Number(el.tagName.slice(1)) || 1;
+    out.push({ id, text, level });
+  });
+  return out;
+}
+
+function buildOfficeToc(items) {
+  const list = $('office-toc-list');
+  const panel = $('office-toc');
+  const btn = $('office-toc-toggle');
+  if (!list) return;
+
+  list.innerHTML = '';
+  if (!items.length) {
+    // 没标题（纯文字文档）就把目录按钮藏起来，别给一个点不开的面板
+    if (btn) btn.hidden = true;
+    return;
+  }
+  if (btn) btn.hidden = false;
+
+  for (const h of items) {
+    const a = document.createElement('button');
+    a.type = 'button';
+    a.className = 'office-toc-item lv' + Math.min(h.level, 4);
+    a.textContent = h.text;
+    a.title = h.text;
+    a.addEventListener('click', () => {
+      const el = document.getElementById(h.id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    list.appendChild(a);
+  }
+}
+
+/* ---------------------------------------------------------------- Word 进度 */
+
+let officeTicking = false;
+
+function initOfficeSeek() {
+  const seek = $('office-seek');
+  if (!seek) return;
+  seek.value = '0';
+  seek.disabled = false;
+  officeTicking = false;
+}
+
+function officeProgress() {
+  const stage = $('office-stage');
+  if (!stage) return 0;
+  // 可滚动距离为 0（内容不足一屏）时返回 0，避免除零
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max <= 0) return 0;
+  const p = stage.scrollTop / max;
+  return Math.min(100, Math.max(0, p * 100));
+}
+
+function syncOfficeSeek() {
+  const seek = $('office-seek');
+  if (seek) seek.value = String(officeProgress());
+}
+
+function restoreOfficePos() {
+  const pos = loadReadPos('office');
+  const stage = $('office-stage');
+  if (!pos || !stage) return;
+  // 等布局稳定后再滚，否则 scrollHeight 还是 0
+  requestAnimationFrame(() => {
+    const max = stage.scrollHeight - stage.clientHeight;
+    if (max <= 0) return;
+    stage.scrollTop = (pos.value / 100) * max;
+    syncOfficeSeek();
+  });
+}
+
+/* ================================================================
+ *  Word 查找
+ * ================================================================
+ *
+ * ★ 与 PDF 查找的本质区别：
+ *   PDF 是 canvas，文字不在DOM 里 -> 只能靠坐标画高亮块。
+ *   Word 是真实 HTML -> **直接往文字节点里插 <mark>**。
+ *
+ *   为什么必须用 mark 而不是绝对定位的 div：
+ *   插 div 会把行内文字撑开（div 是块级），导致**文字重排**，
+ *   排版就乱了；而 <mark> 是行内元素，视觉上和原文字完全一致。
+ *
+ * 查找范围：#office-body 内的文本节点，跳过脚本/样式。
+ */
+
+/** 收集 #office-body 里的可见文本节点。 */
+function collectTextNodes(root) {
+  const out = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      // 跳过空白节点和script/style 内容
+      if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+      const p = node.parentNode;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      const tag = p.nodeName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let n;
+  while ((n = walker.nextNode())) out.push(n);
+  return out;
+}
+
+/** 把命中的文字片段包成 <mark class="office-hl">。 */
+function wrapHit(node, from, to, isCur) {
+  // 一个文本节点可能被多次命中（不同关键词），
+  // 每次只处理"还没被切开的那一段"，用偏移量记录已占用部分。
+  node.__hitRanges = node.__hitRanges || [];
+  // 与已有区间重叠就跳过（简化：只处理第一个未重叠的命中）
+  for (const r of node.__hitRanges) {
+    if (from < r[1] && to > r[0]) return;
+  }
+  node.__hitRanges.push([from, to]);
+
+  const text = node.nodeValue;
+  const mid = text.slice(from, to);
+  const frag = document.createDocumentFragment();
+  if (from > 0) frag.appendChild(document.createTextNode(text.slice(0, from)));
+  const mark = document.createElement('mark');
+  mark.className = 'office-hl' + (isCur ? ' is-cur' : '');
+  mark.textContent = mid;
+  frag.appendChild(mark);
+  if (to < text.length) frag.appendChild(document.createTextNode(text.slice(to)));
+
+  node.parentNode.replaceChild(frag, node);
+}
+
+/** 清除所有高亮（把 <mark> 换回纯文本）。 */
+function clearOfficeHighlights() {
+  const body = $('office-body');
+  if (!body) return;
+  const marks = body.querySelectorAll('mark.office-hl');
+  marks.forEach((m) => {
+    const parent = m.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(m.textContent), m);
+  });
+  // 归一化：把被拆开的相邻文本节点合回去，顺便清掉 __hitRanges
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) nodes.push(n);
+  for (const node of nodes) {
+    delete node.__hitRanges;
+    if (!node.parentNode) continue;
+    if (node.previousSibling && node.previousSibling.nodeType === 3) {
+      const prev = node.previousSibling;
+      prev.nodeValue += node.nodeValue;
+      node.parentNode.removeChild(node);
+    }
+  }
+  body.normalize();
+}
+
+/** 执行查找：记录命中数、标第一个。 */
+function runOfficeFind(q) {
+  const body = $('office-body');
+  if (!body) return;
+  clearOfficeHighlights();
+  OFIND.hits = [];
+  OFIND.cur = -1;
+  const raw = String(q || '');
+  OFIND.q = raw;
+  const cnt = $('office-find-count');
+  if (!raw) {
+    if (cnt) cnt.textContent = '';
+    return;
+  }
+
+  const needle = raw.toLowerCase();
+  const nodes = collectTextNodes(body);
+  for (const node of nodes) {
+    const hay = node.nodeValue.toLowerCase();
+    let from = 0;
+    for (;;) {
+      const at = hay.indexOf(needle, from);
+      if (at < 0) break;
+      OFIND.hits.push({ node, from: at, to: at + needle.length });
+      from = at + Math.max(1, needle.length);
+    }
+  }
+
+  if (OFIND.hits.length) {
+    OFIND.cur = 0;
+    // 倒着包，避免前面的替换影响后面的偏移（从后往前最安全）
+    for (let i = OFIND.hits.length - 1; i >= 0; i--) {
+      const h = OFIND.hits[i];
+      wrapHit(h.node, h.from, h.to, i === 0);
+    }
+    scrollToOfficeHit(0);
+  }
+  if (cnt) {
+    cnt.textContent = OFIND.hits.length
+      ? '1 / ' + OFIND.hits.length
+      : '无结果';
+  }
+}
+
+/** 跳到第 i 个命中并滚过去。 */
+function scrollToOfficeHit(i) {
+  const body = $('office-body');
+  if (!body || !OFIND.hits.length) return;
+  const n = ((i % OFIND.hits.length) + OFIND.hits.length) % OFIND.hits.length;
+  OFIND.cur = n;
+  // 重新高亮以更新 is-cur
+  const q = OFIND.q;
+  if (q) {
+    const rawQ = q;
+    clearOfficeHighlights();
+    OFIND.hits = [];
+    OFIND.cur = -1;
+    // 重新扫一遍
+    const needle = rawQ.toLowerCase();
+    for (const node of collectTextNodes(body)) {
+      const hay = node.nodeValue.toLowerCase();
+      let from = 0;
+      for (;;) {
+        const at = hay.indexOf(needle, from);
+        if (at < 0) break;
+        OFIND.hits.push({ node, from: at, to: at + needle.length });
+        from = at + Math.max(1, needle.length);
+      }
+    }
+    for (let i2 = OFIND.hits.length - 1; i2 >= 0; i2--) {
+      const h = OFIND.hits[i2];
+      wrapHit(h.node, h.from, h.to, i2 === n);
+    }
+  }
+  // 滚到当前高亮
+  const marks = body.querySelectorAll('mark.office-hl');
+  const cur = marks[n];
+  if (cur) {
+    const stage = $('office-stage');
+    if (stage) {
+      const r = cur.getBoundingClientRect();
+      const sr = stage.getBoundingClientRect();
+      stage.scrollTop += (r.top - sr.top) - sr.height / 3;
+    }
+    cur.scrollIntoView({ block: 'center' });
+  }
+  const cnt = $('office-find-count');
+  if (cnt) cnt.textContent = (n + 1) + ' / ' + OFIND.hits.length;
+}
+
+function stepOfficeFind(delta) {
+  if (!OFIND.hits.length) return;
+  scrollToOfficeHit(OFIND.cur + delta);
+}
+
+function closeOfficeFind() {
+  const bar = $('office-find');
+  if (bar) bar.hidden = true;
+  const box = $('office-find-input');
+  if (box) box.value = '';
+  OFIND.q = '';
+  OFIND.hits = [];
+  OFIND.cur = -1;
+  const cnt = $('office-find-count');
+  if (cnt) cnt.textContent = '';
+  clearOfficeHighlights();
+}
+
+/* ================================================================
+ *  Word 书签
+ * ================================================================
+ *
+ * ★ PDF 书签记「第几页」，Word 没有页码概念
+ *   -> 记**滚动百分比**（和saveReadPos 同一套机制）。
+ *
+ * 记百分比而不是像素/offsetTop：
+ *   - 改字号后所有位置都变了，像素坐标全废
+ *   - 百分比对缩放/字号都不敏感（只要内容比例不变）
+ */
+
+function renderOfficeMarks() {
+  const list = $('office-marks-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const data = OFFMARKS.data.slice().sort((a, b) => a.at - b.at);
+  const cur = officeProgress();
+
+  for (const m of data) {
+    const li = document.createElement('li');
+    li.className = 'marks-item';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'marks-jump';
+    btn.textContent = Math.round(m.pct) + '%';
+    // 当前滚动位置附近的书签高亮
+    if (Math.abs(m.pct - cur) < 3) btn.classList.add('is-current');
+    btn.addEventListener('click', () => scrollOfficeToPct(m.pct));
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'marks-del';
+    del.textContent = '×';
+    del.title = '删除';
+    del.addEventListener('click', () => {
+      OFFMARKS.data = OFFMARKS.data.filter((x) => x.at !== m.at);
+      saveOfficeMarks();
+      renderOfficeMarks();
+    });
+
+    li.append(btn, del);
+    list.appendChild(li);
+  }
+
+  const hint = $('office-marks-hint');
+  if (hint) {
+    hint.textContent = data.length
+      ? data.length + ' 个书签（本机保存，关掉页面也在）'
+      : '还没有书签。滚到想标记的位置，点「+ 标记当前位置」。';
+  }
+}
+
+function addOfficeMark() {
+  const pct = officeProgress();
+  // 同一位置附近不重复加
+  if (OFFMARKS.data.some((m) => Math.abs(m.pct - pct) < 2)) {
+    renderOfficeMarks();
+    return;
+  }
+  OFFMARKS.data.push({ pct, at: Date.now() });
+  saveOfficeMarks();
+  renderOfficeMarks();
+}
+
+function clearOfficeMarks() {
+  OFFMARKS.data = [];
+  saveOfficeMarks();
+  renderOfficeMarks();
+}
+
+function scrollOfficeToPct(pct) {
+  const stage = $('office-stage');
+  if (!stage) return;
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max <= 0) return;
+  stage.scrollTo({ top: (pct / 100) * max, behavior: 'smooth' });
+}
+
 
 // ---------------------------------------------------------------- PDF 查找
 //
@@ -1096,9 +1845,11 @@ async function stepFind(delta) {
 async function gotoFindHit(i) {
   const hit = FIND.pageHits[i];
   if (!hit) return;
-  if (S.pdf.page !== hit.page) {
-    S.pdf.page = hit.page;
-    await paintPdf();
+  // 连续滚动：跳到那一页（可能还没渲染，scrollToPage 会先建容器）
+  if (S.pdf.page !== hit.page || !S.pdf.pages.has(hit.page)) {
+    scrollToPage(hit.page);
+    // 等那页渲染完才能定位高亮
+    await renderPdfPage(hit.page);
   }
   updateFindCount();
   await drawHighlights();
@@ -1113,10 +1864,14 @@ async function drawHighlights() {
   clearHighlightLayer();
   if (FIND.cur < 0 || !FIND.pageHits.length) return;
   const hit = FIND.pageHits[FIND.cur];
-  if (hit.page !== S.pdf.page) return;
 
   const doc = S.pdf.doc;
   if (!doc) return;
+  const stage = $('pdf-stage');
+  if (!stage) return;
+  const rec = S.pdf.pages.get(hit.page);
+  // 那页还没渲染出来 -> 没法定位（等它渲染完会再调一次）
+  if (!rec || !rec.rendered) return;
   const page = await doc.getPage(hit.page);
   const tc = await page.getTextContent();
 
@@ -1142,9 +1897,30 @@ async function drawHighlights() {
   const vp = page.getViewport({ scale: sc });
   const layer = $('pdf-highlight');
   if (!layer) return;
-  // 高亮层尺寸对齐 canvas 的显示尺寸
-  layer.style.width = vp.width + 'px';
-  layer.style.height = vp.height + 'px';
+
+  /*
+   * ★ 连续滚动模式下的坐标换算，和之前单canvas 时不同：
+   *
+   *   高亮层是盖在 .pdf-stage 上的（不是盖在某个 canvas 上），
+   *   所以要把「页内坐标」加上两个偏移：
+   *     ① 垂直：页在 .pdf-pages 里的位置 rec.wrap.offsetTop
+   *        + .pdf-stage 的 padding-top（12px）
+   *        - .pdf-stage 当前的 scrollTop
+   *        ↑ 最后减scrollTop 是因为层跟着视口走，不跟着内容走
+   *     ② 水平：页在 .pdf-pages 里是居中的（align-items:center），
+   *        左边距 = (stage 可视宽 - 页宽) / 2
+   *        + .pdf-stage 的 padding-left（10px）
+   *        - stage.scrollLeft
+   */
+  const stageRect = stage.getBoundingClientRect();
+  const wrapRect = rec.wrap.getBoundingClientRect();
+  // 用 getBoundingClientRect 的差值最稳：自动包含 padding、居中、已滚动量
+  const originX = wrapRect.left - stageRect.left;
+  const originY = wrapRect.top - stageRect.top;
+
+  // 层铺满整个 stage（而不是只盖一页）
+  layer.style.width = stage.clientWidth + 'px';
+  layer.style.height = stage.clientHeight + 'px';
 
   let cursor = 0;
 
@@ -1174,8 +1950,9 @@ async function drawHighlights() {
 
     const box = document.createElement('div');
     box.className = 'pdf-hl';
-    box.style.left = ((x + itemW * fracStart) * sc) + 'px';
-    box.style.top = ((pdfH - yTop) * sc) + 'px';
+    // 页内坐标 * 缩放 + 页的视口内原点
+    box.style.left = (originX + (x + itemW * fracStart) * sc) + 'px';
+    box.style.top = (originY + (pdfH - yTop) * sc) + 'px';
     box.style.width = Math.max(4, itemW * (fracEnd - fracStart) * sc) + 'px';
     box.style.height = (fontH * 1.2 * sc) + 'px';
     layer.appendChild(box);
@@ -1200,6 +1977,40 @@ function hideHighlights() {
 
 const MARKS = { data: [] };
 
+/* ---- Word 专用的两个状态 ---- */
+
+//查找：结构与 PDF 的 FIND 平行，但存的是 DOM 节点而不是页码
+const OFIND = { q: '', hits: [], cur: -1 };
+// 书签：记滚动百分比（Word 没有页码）
+const OFFMARKS = { data: [] };
+
+// Word 书签的 key 策略与 PDF 书签一致（用 stableId）
+function officeMarksKey() {
+  const f = S.current;
+  const key = (f && (f.stableId || f.id)) || 'unknown';
+  return 'pv-o-marks:' + key;
+}
+
+function loadOfficeMarks() {
+  try {
+    const raw = localStorage.getItem(officeMarksKey());
+    OFFMARKS.data = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(OFFMARKS.data)) OFFMARKS.data = [];
+    OFFMARKS.data = OFFMARKS.data.filter(
+      (m) => m && typeof m.pct === 'number' && isFinite(m.pct));
+  } catch (_) {
+    OFFMARKS.data = [];
+  }
+}
+
+function saveOfficeMarks() {
+  try {
+    localStorage.setItem(officeMarksKey(), JSON.stringify(OFFMARKS.data));
+  } catch (_) {
+    /* 隐私模式，忽略 */
+  }
+}
+
 /*
  * 书签的存储 key。
  *
@@ -1213,6 +2024,47 @@ function marksKey() {
   const f = S.current;
   const key = (f && (f.stableId || f.id)) || 'unknown';
   return 'pv-marks:' + key;
+}
+
+/*
+ * ---- 记住读到哪了
+ *
+ * 和书签一样的 key 策略（用 stableId，改密码或增删其他文件都不会错位）。
+ * 存两个东西：
+ *   pos:{...}    进度（PDF 是页码，Word 是百分比）
+ *   ts   记下时间，用来判断"要不要提示上次读到哪"
+ *
+ * 只存页码/百分比，不存任何内容 —— 这不是保险库的密钥。
+ */
+function readPosKey() {
+  const f = S.current;
+  const key = (f && (f.stableId || f.id)) || 'unknown';
+  return 'pv-pos:' + key;
+}
+
+function saveReadPos(kind, value) {
+  if (!S.current) return;
+  try {
+    localStorage.setItem(readPosKey(), JSON.stringify({
+      kind, value, ts: Date.now(),
+    }));
+  } catch (_) {
+    /* 隐私模式，忽略 */
+  }
+}
+
+function loadReadPos(kind) {
+  if (!S.current) return null;
+  try {
+    const raw = localStorage.getItem(readPosKey());
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || o.kind !== kind || typeof o.value !== 'number') return null;
+    if (!isFinite(o.value)) return null;
+    return o;
+  } catch (_) {
+    return null;
+  }
 }
 
 function loadMarks() {
@@ -1247,8 +2099,7 @@ function renderMarks() {
     btn.textContent = '第 ' + m.page + ' 页';
     if (m.page === S.pdf.page) btn.classList.add('is-current');
     btn.addEventListener('click', async () => {
-      S.pdf.page = m.page;
-      await paintPdf();
+      await pdfGoTo(m.page);
     });
 
     const del = document.createElement('button');
@@ -1268,6 +2119,8 @@ function renderMarks() {
   $('pdf-marks-hint').textContent = data.length
     ? data.length + ' 个书签（本机保存，关掉页面也在）'
     : '还没有书签。翻到想标记的页，点「+ 标记当前页」。';
+  // 进度条上的小旗要跟着书签一起更新
+  if (typeof renderMarkFlags === 'function') renderMarkFlags();
 }
 
 function addMark() {
@@ -1322,6 +2175,11 @@ function destroyPdf() {
   if (S.pdf.doc) { try { S.pdf.doc.destroy(); } catch (_) {} }
   S.pdf.doc = null;
   S.pdf.task = null;
+  // 连续滚动模式：清掉所有页的 DOM，否则下次打开会看到旧内容
+  S.pdf.pages.clear();
+  S.pdf.renderedUpTo = 0;
+  const host = $('pdf-pages');
+  if (host) host.innerHTML = '';
   // 清查找与高亮（DOM 可能还没建好，所以逐个判存在）
   FIND.q = '';
   FIND.pageHits = [];
@@ -1331,9 +2189,16 @@ function destroyPdf() {
   if (hl) hl.innerHTML = '';
   const box = $('pdf-find-input');
   if (box) box.value = '';
+
+  // Word 侧同样要清：查找高亮是插在 DOM 里的 <mark>，
+  // 不清的话下次打开会看到一堆残留高亮。
+  closeOfficeFind();
+  $('office-marks').hidden = true;
+  OFFMARKS.data = [];
+  clearOfficeHighlights();
 }
 
-function lock() {
+function lock(clearPw = true) {
   S.key = null;
   S.manifest = null;
   S.current = null;
@@ -1348,6 +2213,17 @@ function lock() {
   VAULT.hidden = true;
   GATE.hidden = false;
   gateMsg('');
+  /*
+   * ★ 点「上锁」意味着用户想锁上，这时**必须把记住的密码也忘掉**。
+   *   否则「上锁」只是换个界面，密码还在浏览器里 —— 形同虚设。
+   *   clearPw=false 只用于「刷新后自动解锁」那条路径，
+   *   那种情况下不能清。
+   */
+  if (clearPw) {
+    clearRememberedPw();
+    if (REMEMBER_PW) REMEMBER_PW.checked = false;
+  }
+  syncRememberUI();
   PWD.focus();
 }
 
@@ -1398,6 +2274,20 @@ $('gate-form').addEventListener('submit', async (e) => {
 
   try {
     await unlock(pw);
+    // 恢复侧栏折叠状态（在 renderList 之前，避免布局闪一下）
+    if (loadSidebarPref()) BODY.classList.add('sidebar-collapsed');
+    // ★ 解锁成功了才考虑记住 —— 密码错的时候绝不能存，
+    //   否则下次自动填一个错的，用户会以为密码坏了。
+    if (REMEMBER_PW && REMEMBER_PW.checked) {
+      if (writeRememberedPw(pw)) {
+        syncRememberUI();
+      } else {
+        // 隐私模式下 storage 不可用，如实告诉用户，别假装记住了
+        gateMsg('浏览器不允许存储（可能在隐私模式），本次会话不会记住密码。', 'warn');
+      }
+    } else {
+      clearRememberedPw();
+    }
     GATE.hidden = true;
     VAULT.hidden = false;
     renderList();
@@ -1425,6 +2315,13 @@ WALL_FILTER.addEventListener('input', renderList);
 if (WALL_SORT) WALL_SORT.addEventListener('change', renderList);
 BACK_BTN.addEventListener('click', backToList);
 LIST_FAB.addEventListener('click', backToList);
+
+// ---- 桌面端侧栏折叠
+if ($('sidebar-toggle')) {
+  $('sidebar-toggle').addEventListener('click', () => {
+    setSidebarCollapsed(!isSidebarCollapsed());
+  });
+}
 
 TAB_PHOTOS.addEventListener('click', () => {
   if (S.bucket === 'photos') return;
@@ -1732,10 +2629,148 @@ $('lb-stage').addEventListener('dblclick', (e) => {
   });
 })();
 
+// 连续滚动：滚动时同步当前页 + 按需渲染
+$('pdf-stage').addEventListener('scroll', onPdfScroll, { passive: true });
+// 窗口尺寸变化会改变"适应宽度"的缩放，需要重画
+let pdfResizeTimer = 0;
+window.addEventListener('resize', () => {
+  if (!S.pdf.doc) return;
+  clearTimeout(pdfResizeTimer);
+  pdfResizeTimer = setTimeout(() => {
+    S.pdf.scale = fitScale(S.pdf.doc);
+    repaintAllPdfPages();
+  }, 250);
+});
+
 $('pdf-prev').addEventListener('click', () => pdfGo(-1));
 $('pdf-next').addEventListener('click', () => pdfGo(1));
 $('pdf-zoom-in').addEventListener('click', () => pdfZoom(1.2));
 $('pdf-zoom-out').addEventListener('click', () => pdfZoom(1 / 1.2));
+
+// ---- PDF 进度条拖拽
+//
+// ★ 拖动时**不重渲染**，松手才跳页。
+//   input 事件在拖动中会连续触发（每像素一次），
+//   每次都 await paintPdf()（canvas 渲染 + 查找高亮重算）会把主线程卡死。
+//   现在拖动中只记下目标页，松手（change）才执行。
+$('pdf-seek').addEventListener('input', (e) => {
+  isSeeking = true;
+  const n = Number(e.target.value) || 1;
+  $('pdf-page').textContent = n + ' / ' + S.pdf.numPages;
+  if (seekRaf) cancelAnimationFrame(seekRaf);
+  seekRaf = requestAnimationFrame(() => { seekRaf = 0; });
+});
+$('pdf-seek').addEventListener('change', async (e) => {
+  isSeeking = false;
+  const n = Number(e.target.value) || 1;
+  await pdfGoTo(n);
+});
+// 点进度条（range 自带 click-to-seek），但要阻止拖动结束时误触发
+$('pdf-seek').addEventListener('pointerdown', () => { isSeeking = true; });
+window.addEventListener('pointerup', () => { isSeeking = false; });
+
+// ---- Word 目录面板
+$('office-toc-toggle').addEventListener('click', () => {
+  const panel = $('office-toc');
+  const open = panel.hidden;
+  panel.hidden = !open;
+  $('office-toc-toggle').setAttribute('aria-expanded', String(open));
+});
+$('office-toc-close').addEventListener('click', () => {
+  $('office-toc').hidden = true;
+  $('office-toc-toggle').setAttribute('aria-expanded', 'false');
+});
+
+// ---- Word 字号
+const OFFICE_FONT_MIN = 12;
+const OFFICE_FONT_MAX = 26;
+const OFFICE_FONT_DEFAULT = 16;
+function officeFontStep(delta) {
+  const body = $('office-body');
+  if (!body) return;
+  const cur = parseFloat(body.style.fontSize)
+           || parseFloat(getComputedStyle(body).fontSize)
+           || OFFICE_FONT_DEFAULT;
+  const next = Math.min(OFFICE_FONT_MAX, Math.max(OFFICE_FONT_MIN, cur + delta));
+  body.style.fontSize = next + 'px';
+  syncOfficeSeek();
+}
+$('office-font-up').addEventListener('click', () => officeFontStep(1));
+$('office-font-down').addEventListener('click', () => officeFontStep(-1));
+
+// ---- Word 滚动进度联动
+$('office-stage').addEventListener('scroll', () => {
+  if (officeTicking) return;         // rAF 节流：滚动事件很密集
+  officeTicking = true;
+  requestAnimationFrame(() => {
+    officeTicking = false;
+    syncOfficeSeek();
+  });
+}, { passive: true });
+
+// 滚动停止后再记位置（滚动中不停写 localStorage 是浪费）
+let officeSaveTimer = 0;
+$('office-stage').addEventListener('scroll', () => {
+  clearTimeout(officeSaveTimer);
+  officeSaveTimer = setTimeout(() => {
+    saveReadPos('office', officeProgress());
+  }, 400);
+}, { passive: true });
+
+// ---- Word 进度条拖拽
+$('office-seek').addEventListener('input', (e) => {
+  const stage = $('office-stage');
+  if (!stage) return;
+  const p = Math.min(100, Math.max(0, Number(e.target.value) || 0));
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max > 0) stage.scrollTop = (p / 100) * max;
+});
+
+// ---- Word 查找
+const officeFindInput = $('office-find-input');
+let officeFindTimer = null;
+officeFindInput.addEventListener('input', () => {
+  clearTimeout(officeFindTimer);
+  // 停顿 300ms 才检索：每敲一个字就全文扫一遍会明显卡
+  officeFindTimer = setTimeout(() => runOfficeFind(officeFindInput.value), 300);
+});
+officeFindInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    clearTimeout(officeFindTimer);
+    if (OFIND.hits.length) stepOfficeFind(e.shiftKey ? -1 : 1);
+    else runOfficeFind(officeFindInput.value);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeOfficeFind();
+    $('office-find-toggle').focus();
+  }
+});
+$('office-find-prev').addEventListener('click', () => stepOfficeFind(-1));
+$('office-find-next').addEventListener('click', () => stepOfficeFind(1));
+$('office-find-close').addEventListener('click', closeOfficeFind);
+$('office-find-toggle').addEventListener('click', () => {
+  const bar = $('office-find');
+  bar.hidden = !bar.hidden;
+  if (bar.hidden) {
+    closeOfficeFind();
+  } else {
+    officeFindInput.focus();
+    officeFindInput.select();
+  }
+});
+
+// ---- Word 书签
+$('office-mark-toggle').addEventListener('click', () => {
+  const p = $('office-marks');
+  p.hidden = !p.hidden;
+  if (!p.hidden) renderOfficeMarks();
+});
+$('office-mark-close').addEventListener('click', () => { $('office-marks').hidden = true; });
+$('office-mark-add').addEventListener('click', addOfficeMark);
+$('office-mark-clear').addEventListener('click', clearOfficeMarks);
+
+// ---- 记住上次读到的位置：离开文档时保存
 
 // ---- PDF 查找
 const findInput = $('pdf-find-input');
@@ -1820,6 +2855,27 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (VAULT.hidden) return;
+
+  // ---- Word / PDF 里按 Ctrl+F（Cmd+F）打开查找
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    if (!$('office-view').hidden) {
+      e.preventDefault();
+      const bar = $('office-find');
+      bar.hidden = false;
+      officeFindInput.focus();
+      officeFindInput.select();
+      return;
+    }
+    if (!$('pdf-view').hidden) {
+      e.preventDefault();
+      const bar = $('pdf-find');
+      bar.hidden = false;
+      findInput.focus();
+      findInput.select();
+      return;
+    }
+  }
+
   if (e.key === 'Escape') {
     if (S.current) backToList();
     else if (currentBucket() === 'files') lock();
@@ -1871,3 +2927,54 @@ PWD.focus();
     UNLOCK_BTN.disabled = true;
   }
 })();
+
+/*
+ * ---- 会话内自动解锁
+ *
+ * 如果 sessionStorage 里有记住的密码（用户勾过"记住"），打开页面就自动解锁。
+ * 失败（密码变了 / vault 被重新加密过）就静默退回密码框，
+ * 并把记住的密码清掉 —— 不然每次打开都要试一次错密码，很烦。
+ */
+(async () => {
+  syncRememberUI();
+  const saved = readRememberedPw();
+  if (!saved) {
+    PWD.focus();
+    return;
+  }
+  PWD.value = saved;
+  UNLOCK_BTN.disabled = true;
+  UNLOCK_BTN.textContent = '正在解锁…';
+  try {
+    await unlock(saved);
+    // 不走 submit 处理器：这里已经解锁成功了
+    if (loadSidebarPref()) BODY.classList.add('sidebar-collapsed');
+    GATE.hidden = true;
+    VAULT.hidden = false;
+    renderList();
+    applyLayout();
+    resetIdle();
+    PWD.value = '';
+    UNLOCK_BTN.textContent = '解锁';
+    UNLOCK_BTN.disabled = false;
+  } catch (e) {
+    // 密码失效（改了密码或重新加密过）：清掉，退回手动输入
+    clearRememberedPw();
+    syncRememberUI();
+    PWD.value = '';
+    PWD.focus();
+    UNLOCK_BTN.textContent = '解锁';
+    UNLOCK_BTN.disabled = false;
+    gateMsg('记住的密码已失效，请重新输入。', 'warn');
+  }
+})();
+
+// 勾选状态变化时给即时反馈：取消勾选就立刻清掉已存的
+if (REMEMBER_PW) {
+  REMEMBER_PW.addEventListener('change', () => {
+    if (!REMEMBER_PW.checked) {
+      clearRememberedPw();
+      syncRememberUI();
+    }
+  });
+}

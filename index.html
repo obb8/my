@@ -24,6 +24,20 @@
              spellcheck="false" placeholder="••••••••••••" required>
     </label>
 
+    <!--
+      记住密码（仅本次浏览器会话）。
+      ★ 用 sessionStorage：关掉浏览器 / 新开标签页就失效，
+        不会被同机的其他脚本长期读到。比 localStorage 安全得多。
+        页面内再点一次「上锁」也会立刻清掉。
+    -->
+    <div class="remember-row">
+      <label class="remember-opt">
+        <input type="checkbox" id="remember-pw">
+        <span>本次会话记住密码（关掉浏览器即失效）</span>
+      </label>
+      <span id="remember-state" class="remember-state" hidden>已记住</span>
+    </div>
+
     <button id="unlock-btn" type="submit" class="btn-primary">解锁</button>
 
     <p id="gate-msg" class="msg" role="status" aria-live="polite"></p>
@@ -34,11 +48,16 @@
 <!-- ============ 2. 文件浏览 ============ -->
 <section id="vault" class="vault" hidden>
 
-  <!-- 顶栏 -->
-  <header class="topbar">
-    <button id="back-btn" class="icon-btn" type="button" hidden aria-label="返回">
-      <span aria-hidden="true">‹</span>
-    </button>
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <!-- 桌面端：折叠/展开左侧目录。阅读时折叠，阅读区能占满宽度 -->
+      <button id="sidebar-toggle" class="icon-btn sidebar-toggle" type="button"
+              aria-label="折叠文件目录" title="折叠/展开文件目录">
+        <span aria-hidden="true">☰</span>
+      </button>
+      <button id="back-btn" class="icon-btn" type="button" hidden aria-label="返回">
+        <span aria-hidden="true">‹</span>
+      </button>
     <div class="topbar-title">
       <span id="view-title" class="vault-title">Private Vault</span>
     </div>
@@ -178,8 +197,28 @@
             <button class="tool-btn" id="pdf-zoom-in" type="button" aria-label="放大">+</button>
           </div>
         </div>
+
+        <!--
+          阅读进度条：可拖动 / 可点按跳转。
+          role="slider" 让读屏软件能识别成滑块，键盘 ←→ 也能操作。
+        -->
+        <div class="pdf-progress" id="pdf-progress">
+          <input id="pdf-seek" class="pdf-seek" type="range"
+                 min="1" max="1" value="1" step="1"
+                 aria-label="跳转到指定页">
+          <div class="pdf-progress-flags" id="pdf-progress-flags"
+               aria-hidden="true"></div>
+        </div>
+        <!--
+          连续滚动阅读：每页一个 <div class="pdf-page"> 包一个 canvas。
+          ★ 不再是单canvas —— 一次一页没法连续滚。
+            .pdf-stage 固定高度（flex:1 + overflow:auto），
+            页面在它内部滚动，**外框不会随着内容往下延伸**。
+            .pdf-pages 由 JS 按需注入。
+        -->
         <div class="pdf-stage" id="pdf-stage">
-          <canvas id="pdf-canvas" class="pdf-canvas"></canvas>
+          <div class="pdf-pages" id="pdf-pages"></div>
+          <!-- 查找高亮层：浮在页面上方，跨页共用一个 -->
           <div class="pdf-highlight" id="pdf-highlight"></div>
         </div>
       </div>
@@ -189,10 +228,60 @@
         <div class="viewer-bar">
           <span id="office-name" class="viewer-name"></span>
           <span class="spacer"></span>
+          <button class="btn-ghost" id="office-find-toggle" type="button">查找</button>
+          <button class="btn-ghost" id="office-mark-toggle" type="button">书签</button>
+          <button class="btn-ghost" id="office-toc-toggle" type="button"
+                  aria-expanded="false">目录</button>
+          <div class="tool-group">
+            <button class="tool-btn" id="office-font-down" type="button"
+                    aria-label="减小字号">A−</button>
+            <button class="tool-btn" id="office-font-up" type="button"
+                    aria-label="增大字号">A+</button>
+          </div>
           <button class="btn-ghost" data-act="dl" type="button">下载</button>
         </div>
-        <div class="office-stage">
+
+        <!-- Word 查找：全文搜索 + 上下跳 + 高亮 -->
+        <div class="pdf-find" id="office-find" hidden>
+          <input id="office-find-input" class="pdf-find-input" type="search"
+                 placeholder="在文档中查找…" autocomplete="off">
+          <span id="office-find-count" class="pdf-find-count"></span>
+          <button class="btn-ghost" id="office-find-prev" type="button" aria-label="上一个">‹</button>
+          <button class="btn-ghost" id="office-find-next" type="button" aria-label="下一个">›</button>
+          <button class="btn-ghost" id="office-find-close" type="button" aria-label="关闭">×</button>
+        </div>
+
+        <!-- Word 书签：按滚动位置记录，点击可跳回 -->
+        <div class="pdf-marks" id="office-marks" hidden>
+          <div class="marks-head">
+            <span class="marks-title">书签</span>
+            <button class="btn-ghost" id="office-mark-add" type="button">+ 标记当前位置</button>
+            <button class="btn-ghost" id="office-mark-clear" type="button">清空</button>
+            <button class="btn-ghost" id="office-mark-close" type="button" aria-label="关闭">×</button>
+          </div>
+          <ul class="marks-list" id="office-marks-list"></ul>
+          <p class="marks-hint" id="office-marks-hint"></p>
+        </div>
+
+        <!-- 目录大纲：读 mammoth 转换出的标题，点一下跳过去 -->
+        <nav class="office-toc" id="office-toc" hidden aria-label="文档目录">
+          <div class="office-toc-head">
+            <span>目录</span>
+            <button class="btn-ghost" id="office-toc-close" type="button"
+                    aria-label="关闭目录">×</button>
+          </div>
+          <div class="office-toc-list" id="office-toc-list"></div>
+        </nav>
+
+        <div class="office-stage" id="office-stage">
           <article id="office-body" class="office-body"></article>
+        </div>
+
+        <!-- Word 阅读进度：拖动跳转 + 百分比 -->
+        <div class="pdf-progress" id="office-progress">
+          <input id="office-seek" class="pdf-seek" type="range"
+                 min="0" max="100" value="0" step="0.1"
+                 aria-label="跳转到文档任意位置">
         </div>
       </div>
 
