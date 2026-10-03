@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "kdf": "PBKDF2-HMAC-SHA256",
+  "iterations": 600000,
+  "cipher": "AES-256-GCM",
+  "keyLength": 256,
+  "salt": "64kLAIfqIKB69BNikdXQ5g==",
+  "magic": "VAULT1",
+  "fileCount": 13,
+  "photoCount": 6,
+  "fileCountOnly": 7,
+  "totalPlainBytes": 188035
+}

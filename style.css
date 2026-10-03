@@ -1,0 +1,1006 @@
+/* style.css -- 浅色主题，无外部依赖，手机端优先 */
+
+:root {
+  --bg: #ffffff;
+  --bg-sub: #f7f7f5;
+  --line: rgba(0, 0, 0, 0.10);
+  --line-strong: rgba(0, 0, 0, 0.18);
+  --fg: #1a1a19;
+  --fg-muted: #6b6b66;
+  --fg-faint: #98988f;
+  --accent: #185FA5;
+  --accent-soft: #E6F1FB;
+  --danger: #A32D2D;
+  --warn: #854F0B;
+  --ok: #0F6E56;
+  --radius: 10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", "Hiragino Sans GB", Roboto, sans-serif;
+  /* 手机上手指够得着的最小点击区域 */
+  --tap: 44px;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;      /* 手机上下拉刷新会打断阅读 */
+}
+
+button, input { font-family: inherit; }
+
+/*
+ * ★ 关键：让 HTML 的 hidden 属性真正生效
+ *
+ * 浏览器默认 [hidden] { display: none }，但下面这些规则都设了 display:
+ *   .gate  { display: flex }
+ *   .vault { display: flex }
+ *   .viewer { display: flex }
+ * 作者样式的优先级高于 UA 样式，所以 hidden=true 会被**完全无视**——
+ * 结果是解密成功后密码框不消失、两个界面叠在一起，
+ * 而 JS 逻辑全部正常，于是表现为"输入正确密码没反应"。
+ *
+ * 这条规则必须放在所有设display 的规则**之前**（同优先级时靠前生效）。
+ */
+[hidden] { display: none !important; }
+
+/* ---------------------------------------------------------- 照片墙模式 */
+/*
+ * 照片标签时不要侧栏、不要空预览区，照片铺满整屏。
+ * is-wall 由 app.js 的 applyLayout() 切换。
+ */
+/*
+ * 照片墙模式：侧栏与预览区都藏起来，照片铺满整屏。
+ *
+ * 注意 wall-wrap 必须用 flex 而不是 block：
+ *   .vault-main 是 flex 容器（column 方向），block 子元素宽度由内容决定，
+ *   照片就会挤在左边、右侧留一大片空白。flex + flex:1 才能真正撑满。
+ */
+body.is-wall .vault-main { flex-direction: column; }
+body.is-wall .sidebar,
+body.is-wall .content { display: none; }
+body.is-wall .wall-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+
+/* 照片墙容器：平时隐藏，只有照片标签才出现 */
+.wall-wrap {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 20px 40px;
+  /* 缩略图行高：随屏幕宽度变化，照片墙的基本单位 */
+  --cell-h: 150px;
+}
+@media (max-width: 1200px) { .wall-wrap { --cell-h: 132px; } }
+@media (max-width: 900px)  { .wall-wrap { --cell-h: 118px; } }
+@media (max-width: 600px)  { .wall-wrap { --cell-h: 104px; } }
+.wall-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-shrink: 0;      /* 筛选栏那行不要被压缩 */
+  width: 100%;
+}
+
+/*
+ * 照片内容区：在 flex column 里必须 flex:1 + min-width:0，
+ * 否则宽度由内容决定（照片挤左边），或者滚动行为不对。
+ */
+#wall-body {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+.wall-title { font-size: 15px; font-weight: 500; }
+.wall-count { font-family: var(--mono); font-size: 12px; color: var(--fg-faint); }
+.wall-filter {
+  margin-left: auto;
+  width: min(240px, 46vw);
+  padding: 7px 11px;
+  font-size: 16px;              /* 16px 以下 iOS 聚焦会缩放页面 */
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+}
+.wall-filter:focus { border-color: var(--accent); }
+
+/*
+ * 照片墙：按图片**原始宽高比**紧密排列，从左到右排满一行再换行。
+ *
+ * 为什么用 flex 而不是 grid：
+ *   grid 的 auto-fill + minmax 会强制每格等宽（正方形），照片被裁切、
+ *   行列之间留下不均匀的空隙。flex-wrap + 固定高度 +按比例算宽度，
+ *   才能做到"照片多大就占多宽"，紧密且不裁切。
+ *
+ * --cell-h 是缩略图的目标高度（相当于"一行有多高"），
+ * 照片宽度按自身宽高比算出来，所以竖图窄、横图宽。
+ */
+.wall-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;                /* 紧密一点，视觉上像铺满 */
+  width: 100%;
+}
+
+.wall-cell {
+  position: relative;
+  display: block;
+  padding: 0;
+  /* 宽度在 JS 里按真实宽高比算好后写到 style.width */
+  height: var(--cell-h, 150px);
+  background: var(--bg-sub);
+  border: none;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  flex: 0 0 auto;          /* 不被 flex 拉伸变形 */
+}
+.wall-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;       /* 缩略图按格子裁切，避免留边 */
+  display: block;
+}
+.wall-cell:hover img { transform: scale(1.04); }
+.wall-cap {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 14px 8px 6px;
+  font-size: 11px;
+  color: #fff;
+  text-align: left;
+  background: linear-gradient(to top, rgba(0,0,0,0.7), rgba(0,0,0,0));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wall-group-title {
+  margin: 20px 0 9px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+.wall-group-title:first-child { margin-top: 0; }
+
+/* ---------------------------------------------------------- 灯箱 */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: rgba(12, 12, 11, 0.96);
+  color: #fff;
+  animation: lb-in 0.14s ease;
+}
+@keyframes lb-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .lightbox { animation: none; }
+}
+
+.lb-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+  flex-shrink: 0;
+}
+.lb-name {
+  font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 46vw;
+}
+.lb-info { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.6); }
+.lb-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: rgba(255,255,255,0.85);
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.lb-btn:hover { background: rgba(255,255,255,0.18); }
+.lb-close {
+  width: 36px; height: 36px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  border-radius: 50%;
+}
+
+/* 缩放控件组 */
+.lb-zoom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.lb-zoom-btn {
+  width: 32px;
+  padding: 6px 0;
+  font-size: 17px;
+  line-height: 1;
+  text-align: center;
+}
+.lb-zoom-val {
+  min-width: 52px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+  cursor: pointer;
+}
+
+/*
+ * 翻页按钮必须放在 .lb-stage **里面**：
+ *   放外面的话 position:absolute 的定位参照是 .lightbox（fixed），
+ *   top:50% 会落到整个视口的中线，被顶栏/缩略图条挡住或点不到。
+ */
+.lb-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 6px 52px;
+  position: relative;
+  overflow: hidden;
+}
+.lb-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  /* 缩放走 transform：走合成层，缩放平移都是 GPU 的，不卡 */
+  transition: transform 0.12s ease-out;
+  cursor: zoom-in;
+}
+.lb-stage img.is-zoomed {
+  cursor: grab;
+  transition: none;      /* 拖动时不要有过渡延迟，手感跟手 */
+}
+.lb-stage img.is-zoomed:active { cursor: grabbing; }
+
+/* 放大后舞台变可滚动，滚轮/拖动都能看细节 */
+.lb-stage.is-scrollable { overflow: auto; }
+
+.lb-stage.is-loading::after {
+  content: "解密中…";
+  position: absolute;
+  font-size: 12px;
+  color: rgba(255,255,255,0.65);
+}
+
+/*
+ * 翻页按钮固定在可视区左右边缘。
+ * 舞台放大后会变宽（is-scrollable），按钮若跟着舞台走就会跑出屏幕，
+ * 所以用 fixed 定位：top 相对视口、left/right 贴视口边。
+ */
+.lb-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px; height: 68px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  color: #fff;
+  background: rgba(255,255,255,0.10);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 3;
+}
+.lb-nav:hover { background: rgba(255,255,255,0.2); }
+.lb-nav[hidden] { display: none; }
+.lb-prev { left: 6px; }
+.lb-next { right: 6px; }
+
+.lb-thumbs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px max(10px, env(safe-area-inset-bottom));
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+  background: rgba(0,0,0,0.35);
+}
+.lb-thumb {
+  flex-shrink: 0;
+  width: 50px; height: 50px;
+  background: rgba(255,255,255,0.10) center/cover no-repeat;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lb-thumb.is-active { border-color: #fff; }
+
+@media (max-width: 768px) {
+  .wall-wrap { padding: 12px 12px 30px; }
+  .wall-grid { gap: 4px; }          /* flex布局，只需调间隙 */
+  .wall-filter { width: 44vw; }
+  .lb-stage { padding: 4px 8px; }
+  /* 手机上翻页按钮压在图片两侧，缩小避免挡内容 */
+  .lb-nav { width: 38px; height: 60px; font-size: 24px; }
+  .lb-prev { left: 2px; }
+  .lb-next { right: 2px; }
+}
+
+/* ---------------------------------------------------------- 密码界面 */
+
+.gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--bg-sub);
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 30px 26px;
+}
+
+.gate-title { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
+.gate-sub { margin: 4px 0 24px; color: var(--fg-muted); font-size: 13px; }
+
+.field { display: block; margin-bottom: 16px; }
+.field-label { display: block; margin-bottom: 6px; font-size: 13px; color: var(--fg-muted); }
+
+input[type="password"] {
+  width: 100%;
+  padding: 11px 12px;
+  /* 16px 以下 iOS Safari 会在聚焦时自动放大页面 */
+  font-size: 16px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  outline: none;
+}
+input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.btn-primary {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) { background: #0C447C; }
+.btn-primary:disabled { opacity: 0.55; cursor: default; }
+.btn-inline { width: auto; padding: 10px 22px; }
+
+.btn-ghost {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.btn-ghost:hover { color: var(--fg); border-color: var(--fg-faint); background: var(--bg-sub); }
+
+.msg { min-height: 20px; margin: 12px 0 0; font-size: 13px; }
+.msg.error { color: var(--danger); }
+.msg.warn { color: var(--warn); }
+.msg:empty { margin: 0; }
+
+.gate-meta {
+  margin: 18px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  word-break: break-all;
+}
+
+/* ---------------------------------------------------------- 顶栏 */
+
+.vault { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sub);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.topbar-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vault-title {
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+}
+
+.icon-btn {
+  flex-shrink: 0;
+  width: var(--tap);
+  height: var(--tap);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--bg); color: var(--fg); }
+
+.subbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 4px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sub);
+  font-size: 12px;
+}
+.timer { margin-right: auto; font-family: var(--mono); font-size: 11px; color: var(--fg-faint); }
+.remember { display: flex; align-items: center; gap: 5px; color: var(--fg-muted); cursor: pointer; }
+.remember input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+/* ---------------------------------------------------------- 主体 */
+
+.vault-main { flex: 1; display: flex; min-height: 0; }
+
+.sidebar {
+  width: 272px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sub);
+  min-height: 0;
+}
+.sidebar.is-hidden { display: none; }
+
+/* ---------------------------------------------------------- 标签页（顶栏内） */
+
+.tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+.tab {
+  min-height: 32px;
+  padding: 5px 13px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--fg); }
+.tab.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 500;
+}
+
+.sidebar-head { padding: 12px 12px 4px; flex-shrink: 0; }
+
+.filter {
+  width: 100%;
+  padding: 8px 10px;
+  /* 16px 防止 iOS 聚焦缩放 */
+  font-size: 16px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+}
+.filter:focus { border-color: var(--accent); }
+
+.groups { flex: 1; overflow-y: auto; padding: 0 8px 20px; -webkit-overflow-scrolling: touch; }
+
+.group { margin-bottom: 18px; }
+.group-name {
+  margin: 0 0 4px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--fg-faint);
+  position: sticky;
+  top: 0;
+  background: var(--bg-sub);
+  padding: 4px 0;
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.file:hover { background: var(--bg); }
+.file.is-active { background: var(--accent-soft); }
+
+.ficon {
+  flex-shrink: 0;
+  width: 36px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+}
+.ficon-image { color: var(--ok); border-color: rgba(15,110,86,0.35); }
+.ficon-pdf { color: var(--danger); border-color: rgba(163,45,45,0.35); }
+.ficon-text { color: var(--accent); border-color: rgba(24,95,165,0.35); }
+.ficon-office-docx { color: #1a4f8a; border-color: rgba(26,79,138,0.35); }
+.ficon-office-pptx { color: #a8562b; border-color: rgba(168,86,43,0.35); }
+
+.fmeta { min-width: 0; display: flex; flex-direction: column; }
+.fname {
+  font-size: 13px;
+  color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fsize { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+
+.hint { padding: 8px; font-size: 12px; color: var(--fg-faint); }
+
+/* ---------------------------------------------------------- 内容区 */
+
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+
+.empty {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 30px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+.empty-main { margin: 0 0 6px; font-size: 14px; }
+.empty-sub { margin: 0; font-size: 12px; color: var(--fg-faint); }
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(255,255,255,0.94);
+  color: var(--fg-muted);
+  font-size: 13px;
+  z-index: 5;
+}
+.spinner {
+  width: 26px; height: 26px;
+  border: 2.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
+
+.viewer { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.viewer-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sub);
+}
+.viewer-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spacer { flex: 1; }
+
+.text-body {
+  flex: 1;
+  margin: 0;
+  padding: 18px 20px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+
+
+/* ---------------------------------------------------------- PDF */
+
+.pdf-tools {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.tool-group { display: flex; align-items: center; gap: 4px; }
+.tool-btn {
+  width: 36px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.tool-btn:hover { color: var(--fg); border-color: var(--fg-faint); }
+.tool-btn:active { background: var(--bg-sub); }
+.tool-val {
+  min-width: 54px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.pdf-stage {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12px 10px 20px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #eceae5;              /* 衬在纸张下面，页面边界更清楚 */
+  /* 高亮层要精确盖在 canvas 上，所以容器必须是定位上下文 */
+  position: relative;
+}
+.pdf-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.16);
+}
+
+/* 查找高亮：绝对定位覆盖在 canvas 上，pointer-events:none 不挡鼠标 */
+.pdf-highlight {
+  position: absolute;
+  top: 12px;              /* 与 .pdf-stage 的 padding-top 对齐 */
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 2;
+}
+.pdf-hl {
+  position: absolute;
+  background: rgba(255, 214, 0, 0.45);
+  border-bottom: 2px solid rgba(214, 158, 0, 0.9);
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+
+/* ---------------------------------------------------------- PDF 查找栏 */
+
+.pdf-find {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  flex-wrap: wrap;
+}
+.pdf-find-input {
+  flex: 1;
+  min-width: 160px;
+  padding: 7px 11px;
+  font-size: 16px;                /* 16px 以下 iOS 聚焦会缩放页面 */
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+}
+.pdf-find-input:focus { border-color: var(--accent); }
+.pdf-find-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------- PDF 书签 */
+
+.pdf-marks {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sub);
+  padding: 10px 14px 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.marks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.marks-title { font-size: 13px; font-weight: 500; margin-right: auto; }
+.marks-list { list-style: none; margin: 0; padding: 0; }
+.marks-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.marks-jump {
+  flex: 1;
+  min-height: 32px;
+  padding: 6px 11px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.marks-jump:hover { border-color: var(--fg-faint); }
+.marks-jump.is-current {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(24,95,165,0.4);
+  font-weight: 500;
+}
+.marks-del {
+  width: 30px; height: 30px;
+  flex-shrink: 0;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.marks-del:hover { color: var(--danger); border-color: rgba(163,45,45,0.4); }
+.marks-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+/* ---------------------------------------------------------- Office 文档 */
+
+.office-stage {
+  flex: 1;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg-sub);
+  padding: 0;
+}
+
+/* mammoth 输出的是语义化 HTML，这里给 Word 一样的排版观感 */
+.office-body {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 26px 24px 60px;
+  background: var(--bg);
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--fg);
+  min-height: 100%;
+}
+.office-body h1 { font-size: 24px; font-weight: 500; margin: 0 0 18px; line-height: 1.35; }
+.office-body h2 { font-size: 19px; font-weight: 500; margin: 28px 0 12px; line-height: 1.4; }
+.office-body h3 { font-size: 16px; font-weight: 500; margin: 22px 0 10px; }
+.office-body p { margin: 0 0 13px; }
+.office-body ul, .office-body ol { margin: 0 0 13px; padding-left: 24px; }
+.office-body li { margin-bottom: 5px; }
+.office-body img { max-width: 100%; height: auto; border-radius: 6px; }
+.office-body a { color: var(--accent); }
+.office-body blockquote {
+  margin: 0 0 13px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--fg-muted);
+}
+.office-body table {
+  width: 100%;
+  margin: 0 0 16px;
+  border-collapse: collapse;
+  font-size: 14px;
+  /* 表格宽了在手机上要能横向滑动，不能撑破布局 */
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.office-body th, .office-body td {
+  padding: 7px 11px;
+  border: 1px solid var(--line-strong);
+  text-align: left;
+  white-space: nowrap;
+}
+.office-body th { background: var(--bg-sub); font-weight: 500; }
+.office-body pre {
+  margin: 0 0 13px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--bg-sub);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.office-body .doc-note {
+  margin: 22px 0 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--warn);
+  background: #FAEEDA;
+  border-radius: 7px;
+}
+
+/* ---------------------------------------------------------- 其他 */
+
+.opaque-stage {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 6px;
+  padding: 40px 24px;
+  text-align: center;
+}
+.opaque-icon {
+  width: 46px; height: 56px;
+  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.opaque-text { margin: 0 0 14px; color: var(--fg-muted); font-size: 13px; line-height: 1.7; }
+.opaque-text b { color: var(--fg); font-weight: 500; }
+
+/* 手机端底部"返回列表" */
+.list-fab {
+  position: fixed;
+  left: 50%;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  padding: 11px 26px;
+  font-size: 14px;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 24px;
+  box-shadow: 0 3px 14px rgba(0,0,0,0.2);
+  z-index: 30;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------- 手机端 */
+
+@media (max-width: 768px) {
+  .vault-main { flex-direction: column; }
+
+  .sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* 打开文件后给底部 FAB 让出空间 */
+  .viewer { padding-bottom: 0; }
+
+  .viewer-bar .btn-ghost { padding: 8px 14px; }
+
+  /* 工具栏按钮在手机上要更好按 */
+  .tool-btn { width: var(--tap); height: 38px; font-size: 19px; }
+  .pdf-tools { gap: 12px; padding: 8px 10px; }
+
+  /* 查找栏在窄屏换行，按钮更好按 */
+  .pdf-find { padding: 8px 10px; gap: 6px; }
+  .pdf-find-input { min-width: 0; width: 100%; flex: 1 1 100%; }
+  .pdf-find .btn-ghost { padding: 8px 12px; }
+
+  .pdf-marks { padding: 8px 10px 10px; max-height: 46vh; }
+  .marks-jump { min-height: var(--tap); }
+  .marks-del { width: var(--tap); height: var(--tap); }
+
+  /* Word 文档在窄屏减小内边距，字号适配 */
+  .office-body { padding: 20px 18px 80px; font-size: 16px; line-height: 1.75; }
+  .office-body h1 { font-size: 21px; }
+  .office-body h2 { font-size: 18px; }
+  .office-body h3 { font-size: 16px; }
+
+  .text-body { padding: 14px 16px; font-size: 14px; }
+
+  /* PDF 页面贴边，减少浪费的空白 */
+  .pdf-stage { padding: 8px 6px 90px; }
+
+  /* 照片网格：手机上固定两列，缩略图更大更好点 */
+  .photo-grid { grid-template-columns: repeat(2, 1fr); gap: 7px; }
+
+  /* 翻页按钮在手机上常驻且更宽，手指好按 */
+  .img-nav { width: 44px; height: 64px; font-size: 26px; opacity: 0.75; }
+
+  .image-stage { padding: 0; }
+}
+
+@media print {
+  .topbar, .subbar, .sidebar, .pdf-tools, .list-fab, .viewer-bar .btn-ghost {
+    display: none !important;
+  }
+  .office-body { max-width: none; padding: 0; }
+}

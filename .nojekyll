@@ -1,0 +1,10 @@
+/*
+ * .nojekyll —— 这个文件的存在是必须的，别删。
+ *
+ * GitHub Pages 默认会用 Jekyll 处理你的文件。Jekyll 会：
+ *   - 忽略以下划线 _ 开头的目录
+ *   - 尝试解析 front matter，把不认识的 Liquid 标签当错误
+ * 结果就是 .enc 文件可能部署不上去、或者构建报错。
+ *
+ * 建一个空的 .nojekyll 文件，等于告诉 GitHub："跳过 Jekyll，原样发布。"
+ */

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Private Vault</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ 1. 密码界面 ============ -->
+<section id="gate" class="gate">
+  <form id="gate-form" class="gate-card" autocomplete="off">
+    <h1 class="gate-title">Private Vault</h1>
+    <p class="gate-sub">请输入密码以解密</p>
+
+    <label class="field">
+      <span class="field-label">密码</span>
+      <input id="pwd" type="password" autocomplete="current-password"
+             spellcheck="false" placeholder="••••••••••••" required>
+    </label>
+
+    <button id="unlock-btn" type="submit" class="btn-primary">解锁</button>
+
+    <p id="gate-msg" class="msg" role="status" aria-live="polite"></p>
+    <p id="gate-meta" class="gate-meta"></p>
+  </form>
+</section>
+
+<!-- ============ 2. 文件浏览 ============ -->
+<section id="vault" class="vault" hidden>
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <button id="back-btn" class="icon-btn" type="button" hidden aria-label="返回">
+      <span aria-hidden="true">‹</span>
+    </button>
+    <div class="topbar-title">
+      <span id="view-title" class="vault-title">Private Vault</span>
+    </div>
+    <!-- 标签页放顶栏：照片墙模式下侧栏被藏了，靠这里切回文件区 -->
+    <div class="tabs">
+      <button id="tab-photos" class="tab is-active" type="button">照片</button>
+      <button id="tab-files" class="tab" type="button">文件</button>
+    </div>
+    <span id="file-count" class="pill"></span>
+    <button id="lock-btn" class="icon-btn" type="button" aria-label="上锁" title="上锁">
+      <span aria-hidden="true">🔒</span>
+    </button>
+  </header>
+
+  <div class="subbar">
+    <span class="timer" id="timer" hidden></span>
+    <label class="remember">
+      <input type="checkbox" id="remember" checked>
+      <span>本会话保持解锁</span>
+    </label>
+  </div>
+
+  <main class="vault-main">
+    <!-- 文件列表（仅文件标签可见） -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <input id="filter" class="filter" type="search" placeholder="筛选文件…" autocomplete="off">
+      </div>
+      <nav id="files-panel" class="groups"></nav>
+    </aside>
+
+    <!-- 照片墙：照片标签时铺满整屏，不带预览区 -->
+    <section class="wall-wrap" id="wall">
+      <div class="wall-head">
+        <span class="wall-title">照片</span>
+        <span class="wall-count" id="wall-count"></span>
+        <input id="wall-filter" class="wall-filter" type="search" placeholder="筛选照片…" autocomplete="off">
+      </div>
+      <div id="wall-body"></div>
+    </section>
+
+    <!-- 内容区 -->
+    <div class="content" id="content">
+
+      <div id="empty-hint" class="empty">
+        <p class="empty-main">选一个文件开始浏览</p>
+        <p class="empty-sub">左侧列表点一下即可</p>
+      </div>
+
+      <div id="loading" class="loading" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="loading-text">正在解密…</p>
+      </div>
+
+      <div id="err-view" class="viewer" hidden>
+        <div class="opaque-stage">
+          <p class="opaque-icon" aria-hidden="true"></p>
+          <p class="opaque-text" id="err-text"></p>
+          <button class="btn-primary btn-inline" data-act="retry" type="button">重试</button>
+        </div>
+      </div>
+
+      <!-- 文本 -->
+      <div id="text-view" class="viewer" hidden>
+        <div class="viewer-bar">
+          <span id="text-name" class="viewer-name"></span>
+          <span class="spacer"></span>
+          <button class="btn-ghost" data-act="dl" type="button">下载</button>
+        </div>
+        <pre id="text-body" class="text-body"></pre>
+      </div>
+
+      <!-- 图片统一走灯箱（#lightbox），这里不再需要独立的图片预览区 -->
+
+      <!-- PDF：pdf.js 渲染到 canvas -->
+      <div id="pdf-view" class="viewer" hidden>
+        <div class="viewer-bar">
+          <span id="pdf-name" class="viewer-name"></span>
+          <span class="spacer"></span>
+          <button class="btn-ghost" id="pdf-find-toggle" type="button">查找</button>
+          <button class="btn-ghost" id="pdf-mark-toggle" type="button">书签</button>
+          <button class="btn-ghost" data-act="dl" type="button">下载</button>
+        </div>
+
+        <!-- 查找栏：全文搜索 + 上下跳结果 -->
+        <div class="pdf-find" id="pdf-find" hidden>
+          <input id="pdf-find-input" class="pdf-find-input" type="search"
+                 placeholder="在文档中查找…" autocomplete="off">
+          <span id="pdf-find-count" class="pdf-find-count"></span>
+          <button class="btn-ghost" id="pdf-find-prev" type="button" aria-label="上一个">‹</button>
+          <button class="btn-ghost" id="pdf-find-next" type="button" aria-label="下一个">›</button>
+          <button class="btn-ghost" id="pdf-find-close" type="button" aria-label="关闭">×</button>
+        </div>
+
+        <!-- 书签面板：可添加/跳转/删除，保存在浏览器本地 -->
+        <div class="pdf-marks" id="pdf-marks" hidden>
+          <div class="marks-head">
+            <span class="marks-title">书签</span>
+            <button class="btn-ghost" id="pdf-mark-add" type="button">+ 标记当前页</button>
+            <button class="btn-ghost" id="pdf-mark-clear" type="button">清空</button>
+            <button class="btn-ghost" id="pdf-mark-close" type="button" aria-label="关闭">×</button>
+          </div>
+          <ul class="marks-list" id="pdf-marks-list"></ul>
+          <p class="marks-hint" id="pdf-marks-hint"></p>
+        </div>
+
+        <div class="pdf-tools">
+          <div class="tool-group">
+            <button class="tool-btn" id="pdf-prev" type="button" aria-label="上一页">‹</button>
+            <span class="tool-val" id="pdf-page">1 / 1</span>
+            <button class="tool-btn" id="pdf-next" type="button" aria-label="下一页">›</button>
+          </div>
+          <div class="tool-group">
+            <button class="tool-btn" id="pdf-zoom-out" type="button" aria-label="缩小">−</button>
+            <span class="tool-val" id="pdf-zoom">100%</span>
+            <button class="tool-btn" id="pdf-zoom-in" type="button" aria-label="放大">+</button>
+          </div>
+        </div>
+        <div class="pdf-stage" id="pdf-stage">
+          <canvas id="pdf-canvas" class="pdf-canvas"></canvas>
+          <div class="pdf-highlight" id="pdf-highlight"></div>
+        </div>
+      </div>
+
+      <!-- Word：mammoth 转 HTML -->
+      <div id="office-view" class="viewer" hidden>
+        <div class="viewer-bar">
+          <span id="office-name" class="viewer-name"></span>
+          <span class="spacer"></span>
+          <button class="btn-ghost" data-act="dl" type="button">下载</button>
+        </div>
+        <div class="office-stage">
+          <article id="office-body" class="office-body"></article>
+        </div>
+      </div>
+
+      <!-- 确实不能内联预览的类型 -->
+      <div id="opaque-view" class="viewer" hidden>
+        <div class="viewer-bar">
+          <span id="opaque-name" class="viewer-name"></span>
+        </div>
+        <div class="opaque-stage">
+          <p class="opaque-icon" aria-hidden="true"></p>
+          <p class="opaque-text" id="opaque-text"></p>
+          <button class="btn-primary btn-inline" data-act="dl" type="button">下载这个文件</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 手机端：打开文件后底部出现"返回列表" -->
+  <button id="list-fab" class="list-fab" type="button" hidden>文件列表</button>
+</section>
+
+<!-- ============ 3. 照片灯箱：点缩略图后弹出的小窗 ============ -->
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="照片查看">
+  <div class="lb-top">
+    <span id="lb-name" class="lb-name"></span>
+    <span class="spacer"></span>
+    <span id="lb-info" class="lb-info"></span>
+    <div class="lb-zoom">
+      <button class="lb-btn lb-zoom-btn" id="lb-zoom-out" type="button" title="缩小 (−)" aria-label="缩小">−</button>
+      <button class="lb-btn lb-zoom-val" id="lb-zoom-reset" type="button" title="恢复原始大小">适应</button>
+      <button class="lb-btn lb-zoom-btn" id="lb-zoom-in" type="button" title="放大 (+)" aria-label="放大">+</button>
+    </div>
+    <button class="lb-btn" id="lb-dl" type="button" title="下载这张">下载</button>
+    <button class="lb-btn lb-close" id="lb-close" type="button" title="关闭 (Esc)" aria-label="关闭">×</button>
+  </div>
+
+  <div class="lb-stage" id="lb-stage">
+    <button class="lb-nav lb-prev" id="lb-prev" type="button" aria-label="上一张">‹</button>
+    <img id="lb-img" alt="">
+    <button class="lb-nav lb-next" id="lb-next" type="button" aria-label="下一张">›</button>
+  </div>
+
+  <div class="lb-thumbs" id="lb-thumbs"></div>
+</div>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>
