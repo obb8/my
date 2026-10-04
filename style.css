@@ -948,7 +948,6 @@ kbd {
   font-weight: 500;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.spacer { flex: 1; }
 
 .text-body {
   flex: 1;

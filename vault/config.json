@@ -4,10 +4,10 @@
   "iterations": 600000,
   "cipher": "AES-256-GCM",
   "keyLength": 256,
-  "salt": "qDXqknVgq38undmI4dmI5Q==",
+  "salt": "Nmkswyz5rbBUuwnS84Ux5w==",
   "magic": "VAULT1",
-  "fileCount": 335,
-  "photoCount": 328,
+  "fileCount": 393,
+  "photoCount": 386,
   "fileCountOnly": 7,
-  "totalPlainBytes": 273599888
+  "totalPlainBytes": 302353339
 }
