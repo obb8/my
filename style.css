@@ -648,7 +648,22 @@ input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3p
   background: var(--bg-sub);
   font-size: 12px;
 }
-.timer { margin-right: auto; font-family: var(--mono); font-size: 11px; color: var(--fg-faint); }
+/*
+ * 空闲倒计时。
+ * 用等宽字体：mm:ss 每秒刷新，等宽才不会左右抖动。
+ * 淡色（--fg-faint）在副栏里不抢眼，但对比度要够 WCAG AA，
+ * 所以用 --fg-muted 而不是更浅的灰。
+ */
+.timer {
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+/* 最后一分钟提示一下（JS 会加这个类） */
+.timer.is-urgent { color: var(--warn); font-weight: 600; }
 .remember { display: flex; align-items: center; gap: 5px; color: var(--fg-muted); cursor: pointer; }
 .remember input { accent-color: var(--accent); width: 15px; height: 15px; }
 
@@ -976,10 +991,39 @@ kbd {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 10px;
   padding: 2px 14px 6px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
+}
+/*
+ * 位于阅读框**下方**的进度条（PDF / Word 现在都用这个）。
+ * 差异：分隔线在上边缘（把进度条和内容隔开），上内边距给轨道留空间。
+ */
+.pdf-progress-bottom {
+  border-bottom: none;
+  border-top: 1px solid var(--line);
+  padding: 7px 14px 4px;
+}
+/* 左侧的「当前页 / 百分比」文字标签 */
+.pdf-progress-val {
+  flex-shrink: 0;
+  min-width: 62px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  text-align: right;
+  user-select: none;
+}
+/*
+ * 后代选择器（.pdf-progress-bottom .pdf-seek）必须写成多行：
+ * 单行简写里出现的 ".pdf-seek {" 会被按字符串搜样式块的测试
+ * 误当成主规则，提取到不含 height 的那一段。
+ */
+.pdf-progress-bottom .pdf-seek {
+  flex: 1;
+  min-width: 0;
 }
 .pdf-seek {
   -webkit-appearance: none;
@@ -1037,6 +1081,15 @@ kbd {
   top: 4px;
   height: 12px;
   pointer-events: none;    /* 容器不吃点击，只有小旗吃 */
+}
+/*
+ * 底部进度条里的小旗层：跟着轨道走。
+ * 轨道现在左边有个页码标签，所以左边距要加上标签宽度 + 间距
+ * （62px + 10px gap = 72px），否则小旗会整体偏左、跟 thumb 对不齐。
+ */
+.pdf-progress-bottom .pdf-progress-flags {
+  left: 82px;
+  top: 7px;
 }
 .pdf-flag {
   position: absolute;
@@ -1192,74 +1245,6 @@ kbd {
   z-index: 3;
 }
 .pdf-page-flag:hover { border-right-color: #EF9F27; }
-
-/* 查找高亮：绝对定位在 .pdf-stage 上，坐标由 JS 按页换算。
-   pointer-events:none 不挡鼠标。 */
-.pdf-highlight {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 2;
-}
-.pdf-hl {
-  position: absolute;
-  background: rgba(255, 214, 0, 0.45);
-  border-bottom: 2px solid rgba(214, 158, 0, 0.9);
-  border-radius: 2px;
-  mix-blend-mode: multiply;
-}
-
-/* ---- Word 查找高亮
- *
- * ★ 用 <mark>（行内元素）而不是绝对定位的 div：
- *   div 是块级，插进段落里会把文字撑开、**整个段落重排**，
- *   版面就乱了。<mark> 是行内元素，视觉上与原文字完全一致。
- */
-.office-hl {
-  background: rgba(255, 214, 0, 0.45);
-  color: inherit;
-  border-bottom: 2px solid rgba(214, 158, 0, 0.9);
-  border-radius: 2px;
-  padding: 0;
-}
-/* 当前命中的那个：颜色更醒目，并加粗 */
-.office-hl.is-cur {
-  background: rgba(255, 170, 0, 0.65);
-  border-bottom-color: #D9822B;
-  font-weight: 500;
-}
-
-/* ---------------------------------------------------------- PDF 查找栏 */
-
-.pdf-find {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg);
-  flex-wrap: wrap;
-}
-.pdf-find-input {
-  flex: 1;
-  min-width: 160px;
-  padding: 7px 11px;
-  font-size: 16px;                /* 16px 以下 iOS 聚焦会缩放页面 */
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  outline: none;
-}
-.pdf-find-input:focus { border-color: var(--accent); }
-.pdf-find-count {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
 
 /* ---------------------------------------------------------- PDF 书签 */
 
@@ -1466,11 +1451,6 @@ kbd {
   /* 工具栏按钮在手机上要更好按 */
   .tool-btn { width: var(--tap); height: 38px; font-size: 19px; }
   .pdf-tools { gap: 12px; padding: 8px 10px; }
-
-  /* 查找栏在窄屏换行，按钮更好按 */
-  .pdf-find { padding: 8px 10px; gap: 6px; }
-  .pdf-find-input { min-width: 0; width: 100%; flex: 1 1 100%; }
-  .pdf-find .btn-ghost { padding: 8px 12px; }
 
   .pdf-marks { padding: 8px 10px 10px; max-height: 46vh; }
   .marks-jump { min-height: var(--tap); }

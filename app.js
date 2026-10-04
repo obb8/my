@@ -121,6 +121,7 @@ const S = {
   thumbs: new Map(),     // id -> dataURL 缩略图（给灯箱底部条复用）
   objectUrls: [],
   idleTimer: null,
+  idleTick: null,   // 倒计时的 setInterval（必须和 idleTimer 一起清理，见 resetIdle 注释）
   unlocking: false,
   /*
    * PDF 状态。
@@ -499,7 +500,7 @@ function resetZoom() {
 }
 
 async function openLightbox(id) {
-  if (S.idleTimer) resetIdle();
+  resetIdle();
   LB.list = bucketFiles();
   const i = LB.list.findIndex((f) => f.id === id);
   if (i < 0) return;
@@ -876,7 +877,7 @@ async function getFileData(id) {
 // ---------------------------------------------------------------- 打开文件
 
 async function openEntry(id) {
-  if (S.idleTimer) resetIdle();
+  resetIdle();
 
   const entry = S.manifest.files.find((f) => f.id === id);
   if (!entry) return;
@@ -979,8 +980,7 @@ async function renderPdf(data) {
   S.pdf.page = 1;
   S.pdf.scale = fitScale(S.pdf.doc);
   $('pdf-page').textContent = '1 / ' + S.pdf.numPages;
-  // 换文档时重置查找状态，并载入该文档的书签
-  closeFind();
+  // 换文档时载入该文档的书签
   $('pdf-marks').hidden = true;
   loadMarks();
   initPdfSeek();
@@ -1014,7 +1014,23 @@ function initPdfSeek() {
   seek.max = String(S.pdf.numPages);
   seek.value = String(S.pdf.page);
   seek.disabled = S.pdf.numPages <= 1;
+  syncPdfProgressLabel();
   renderMarkFlags();
+}
+
+/** 刷新 PDF 进度条左侧的「当前页 / 总页数」标签。 */
+function syncPdfProgressLabel() {
+  const el = $('pdf-progress-val');
+  if (!el) return;
+  const n = S.pdf.numPages || 0;
+  el.textContent = n ? S.pdf.page + ' / ' + n : '—';
+}
+
+/** 刷新 Word 进度条左侧的百分比标签。 */
+function syncOfficeProgressLabel() {
+  const el = $('office-progress-val');
+  if (!el) return;
+  el.textContent = Math.round(officeProgress()) + '%';
 }
 
 /** 书签在进度条上的小旗标记。 */
@@ -1215,6 +1231,7 @@ function syncPdfFromScroll() {
     $('pdf-page').textContent = current + ' / ' + S.pdf.numPages;
     const seek = $('pdf-seek');
     if (seek) seek.value = String(current);
+    syncPdfProgressLabel();
     saveReadPos('pdf', current);
   }
 
@@ -1225,14 +1242,9 @@ function syncPdfFromScroll() {
     if (S.pdf.pages.get(p) && !S.pdf.pages.get(p).rendered) renderPdfPage(p);
   }
   recycleFarPages(from, to);
-
-  // 查找高亮要跟着当前页重画（坐标依赖页面位置）
-  if (FIND.pageHits.length) {
-    try { drawHighlights(); } catch (_) { /* 高亮失败不影响阅读 */ }
-  }
 }
 
-/** 滚到指定页。进度条拖动、书签跳转、查找跳结果都走这里。 */
+/** 滚到指定页。进度条拖动、书签跳转都走这里。 */
 function scrollToPage(no, smooth = false) {
   const stage = $('pdf-stage');
   if (!stage || !S.pdf.doc) return;
@@ -1249,6 +1261,7 @@ function scrollToPage(no, smooth = false) {
     $('pdf-page').textContent = target + ' / ' + S.pdf.numPages;
     const seek = $('pdf-seek');
     if (seek) seek.value = String(target);
+    syncPdfProgressLabel();
     saveReadPos('pdf', target);
     syncPdfFromScroll();
   });
@@ -1263,9 +1276,6 @@ async function repaintAllPdfPages() {
   const keep = S.pdf.page;
   await renderPdfPage(keep);
   syncPdfFromScroll();
-  if (FIND.pageHits.length) {
-    try { await drawHighlights(); } catch (_) { /* 忽略 */ }
-  }
 }
 
 /**
@@ -1375,8 +1385,7 @@ async function renderDocx(data) {
   hideLoading();
 
   buildOfficeToc(collectHeadings(body));
-  // 换文档时重置查找/书签状态，载入该文档的 Word 书签
-  closeOfficeFind();
+  // 换文档时载入该文档的 Word 书签
   $('office-marks').hidden = true;
   loadOfficeMarks();
   renderOfficeMarks();
@@ -1439,6 +1448,8 @@ function initOfficeSeek() {
   seek.value = '0';
   seek.disabled = false;
   officeTicking = false;
+  const lab = $('office-progress-val');
+  if (lab) lab.textContent = '0%';
 }
 
 function officeProgress() {
@@ -1454,6 +1465,7 @@ function officeProgress() {
 function syncOfficeSeek() {
   const seek = $('office-seek');
   if (seek) seek.value = String(officeProgress());
+  syncOfficeProgressLabel();
 }
 
 function restoreOfficePos() {
@@ -1467,201 +1479,6 @@ function restoreOfficePos() {
     stage.scrollTop = (pos.value / 100) * max;
     syncOfficeSeek();
   });
-}
-
-/* ================================================================
- *  Word 查找
- * ================================================================
- *
- * ★ 与 PDF 查找的本质区别：
- *   PDF 是 canvas，文字不在DOM 里 -> 只能靠坐标画高亮块。
- *   Word 是真实 HTML -> **直接往文字节点里插 <mark>**。
- *
- *   为什么必须用 mark 而不是绝对定位的 div：
- *   插 div 会把行内文字撑开（div 是块级），导致**文字重排**，
- *   排版就乱了；而 <mark> 是行内元素，视觉上和原文字完全一致。
- *
- * 查找范围：#office-body 内的文本节点，跳过脚本/样式。
- */
-
-/** 收集 #office-body 里的可见文本节点。 */
-function collectTextNodes(root) {
-  const out = [];
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      // 跳过空白节点和script/style 内容
-      if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-      const p = node.parentNode;
-      if (!p) return NodeFilter.FILTER_REJECT;
-      const tag = p.nodeName;
-      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') {
-        return NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-  let n;
-  while ((n = walker.nextNode())) out.push(n);
-  return out;
-}
-
-/** 把命中的文字片段包成 <mark class="office-hl">。 */
-function wrapHit(node, from, to, isCur) {
-  // 一个文本节点可能被多次命中（不同关键词），
-  // 每次只处理"还没被切开的那一段"，用偏移量记录已占用部分。
-  node.__hitRanges = node.__hitRanges || [];
-  // 与已有区间重叠就跳过（简化：只处理第一个未重叠的命中）
-  for (const r of node.__hitRanges) {
-    if (from < r[1] && to > r[0]) return;
-  }
-  node.__hitRanges.push([from, to]);
-
-  const text = node.nodeValue;
-  const mid = text.slice(from, to);
-  const frag = document.createDocumentFragment();
-  if (from > 0) frag.appendChild(document.createTextNode(text.slice(0, from)));
-  const mark = document.createElement('mark');
-  mark.className = 'office-hl' + (isCur ? ' is-cur' : '');
-  mark.textContent = mid;
-  frag.appendChild(mark);
-  if (to < text.length) frag.appendChild(document.createTextNode(text.slice(to)));
-
-  node.parentNode.replaceChild(frag, node);
-}
-
-/** 清除所有高亮（把 <mark> 换回纯文本）。 */
-function clearOfficeHighlights() {
-  const body = $('office-body');
-  if (!body) return;
-  const marks = body.querySelectorAll('mark.office-hl');
-  marks.forEach((m) => {
-    const parent = m.parentNode;
-    if (!parent) return;
-    parent.replaceChild(document.createTextNode(m.textContent), m);
-  });
-  // 归一化：把被拆开的相邻文本节点合回去，顺便清掉 __hitRanges
-  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-  const nodes = [];
-  let n;
-  while ((n = walker.nextNode())) nodes.push(n);
-  for (const node of nodes) {
-    delete node.__hitRanges;
-    if (!node.parentNode) continue;
-    if (node.previousSibling && node.previousSibling.nodeType === 3) {
-      const prev = node.previousSibling;
-      prev.nodeValue += node.nodeValue;
-      node.parentNode.removeChild(node);
-    }
-  }
-  body.normalize();
-}
-
-/** 执行查找：记录命中数、标第一个。 */
-function runOfficeFind(q) {
-  const body = $('office-body');
-  if (!body) return;
-  clearOfficeHighlights();
-  OFIND.hits = [];
-  OFIND.cur = -1;
-  const raw = String(q || '');
-  OFIND.q = raw;
-  const cnt = $('office-find-count');
-  if (!raw) {
-    if (cnt) cnt.textContent = '';
-    return;
-  }
-
-  const needle = raw.toLowerCase();
-  const nodes = collectTextNodes(body);
-  for (const node of nodes) {
-    const hay = node.nodeValue.toLowerCase();
-    let from = 0;
-    for (;;) {
-      const at = hay.indexOf(needle, from);
-      if (at < 0) break;
-      OFIND.hits.push({ node, from: at, to: at + needle.length });
-      from = at + Math.max(1, needle.length);
-    }
-  }
-
-  if (OFIND.hits.length) {
-    OFIND.cur = 0;
-    // 倒着包，避免前面的替换影响后面的偏移（从后往前最安全）
-    for (let i = OFIND.hits.length - 1; i >= 0; i--) {
-      const h = OFIND.hits[i];
-      wrapHit(h.node, h.from, h.to, i === 0);
-    }
-    scrollToOfficeHit(0);
-  }
-  if (cnt) {
-    cnt.textContent = OFIND.hits.length
-      ? '1 / ' + OFIND.hits.length
-      : '无结果';
-  }
-}
-
-/** 跳到第 i 个命中并滚过去。 */
-function scrollToOfficeHit(i) {
-  const body = $('office-body');
-  if (!body || !OFIND.hits.length) return;
-  const n = ((i % OFIND.hits.length) + OFIND.hits.length) % OFIND.hits.length;
-  OFIND.cur = n;
-  // 重新高亮以更新 is-cur
-  const q = OFIND.q;
-  if (q) {
-    const rawQ = q;
-    clearOfficeHighlights();
-    OFIND.hits = [];
-    OFIND.cur = -1;
-    // 重新扫一遍
-    const needle = rawQ.toLowerCase();
-    for (const node of collectTextNodes(body)) {
-      const hay = node.nodeValue.toLowerCase();
-      let from = 0;
-      for (;;) {
-        const at = hay.indexOf(needle, from);
-        if (at < 0) break;
-        OFIND.hits.push({ node, from: at, to: at + needle.length });
-        from = at + Math.max(1, needle.length);
-      }
-    }
-    for (let i2 = OFIND.hits.length - 1; i2 >= 0; i2--) {
-      const h = OFIND.hits[i2];
-      wrapHit(h.node, h.from, h.to, i2 === n);
-    }
-  }
-  // 滚到当前高亮
-  const marks = body.querySelectorAll('mark.office-hl');
-  const cur = marks[n];
-  if (cur) {
-    const stage = $('office-stage');
-    if (stage) {
-      const r = cur.getBoundingClientRect();
-      const sr = stage.getBoundingClientRect();
-      stage.scrollTop += (r.top - sr.top) - sr.height / 3;
-    }
-    cur.scrollIntoView({ block: 'center' });
-  }
-  const cnt = $('office-find-count');
-  if (cnt) cnt.textContent = (n + 1) + ' / ' + OFIND.hits.length;
-}
-
-function stepOfficeFind(delta) {
-  if (!OFIND.hits.length) return;
-  scrollToOfficeHit(OFIND.cur + delta);
-}
-
-function closeOfficeFind() {
-  const bar = $('office-find');
-  if (bar) bar.hidden = true;
-  const box = $('office-find-input');
-  if (box) box.value = '';
-  OFIND.q = '';
-  OFIND.hits = [];
-  OFIND.cur = -1;
-  const cnt = $('office-find-count');
-  if (cnt) cnt.textContent = '';
-  clearOfficeHighlights();
 }
 
 /* ================================================================
@@ -1745,229 +1562,6 @@ function scrollOfficeToPct(pct) {
 }
 
 
-// ---------------------------------------------------------------- PDF 查找
-//
-// pdf.js 只能拿到每页的"文字内容 + 坐标"，没有现成的全文搜索 API，
-// 所以流程是：逐页取textContent -> 拼成"每页一个字符串" -> 字符串匹配。
-// 拿到页码后跳过去，并把命中位置用坐标画成高亮矩形。
-//
-// 为什么不用 cMaps：cMaps 是给"提取文本"用的额外字典。我们这里的 PDF
-// 本身带文字层（复制能选中的那种），直接 getTextContent 就有结果。
-// 扫描件（图片型PDF）提取不到文字，会提示"该文档没有可搜索的文字"。
-
-const FIND = {
-  q: '',
-  hits: [],        // [{ page, index }] 按页分组
-  pageHits: [],    // 扁平数组，方便上/下一个跳
-  cur: -1,
-  scanned: false,  // 提取不到文字 -> 可能是扫描件
-  building: false,
-};
-
-async function buildFindIndex() {
-  const doc = S.pdf.doc;
-  if (!doc) return;
-  FIND.pageHits = [];
-  FIND.scanned = false;
-  FIND.building = true;
-  $('pdf-find-count').textContent = '检索中…';
-
-  try {
-    for (let p = 1; p <= doc.numPages; p++) {
-      const page = await doc.getPage(p);
-      const tc = await page.getTextContent();
-      const text = tc.items.map((i) => i.str).join('');
-      if (!text.trim()) continue;
-
-      // 大小写不敏感匹配，记下每个命中的位置
-      const lower = text.toLowerCase();
-      const q = FIND.q.toLowerCase();
-      let from = 0;
-      for (;;) {
-        const at = lower.indexOf(q, from);
-        if (at < 0) break;
-        FIND.pageHits.push({ page: p, index: at, len: q.length });
-        from = at + Math.max(1, q.length);
-      }
-    }
-    // 全文一个汉字都没提到-> 大概率是扫描件
-    let totalChars = 0;
-    for (let p = 1; p <= doc.numPages; p++) {
-      const page = await doc.getPage(p);
-      const tc = await page.getTextContent();
-      totalChars += tc.items.length;
-    }
-    FIND.scanned = totalChars < 5;
-  } catch (e) {
-    FIND.scanned = true;
-  } finally {
-    FIND.building = false;
-    updateFindCount();
-  }
-}
-
-function updateFindCount() {
-  const el = $('pdf-find-count');
-  if (!el) return;
-  if (FIND.building) { el.textContent = '检索中…'; return; }
-  if (FIND.scanned) { el.textContent = '该 PDF 没有可搜索的文字（可能是扫描件）'; return; }
-  if (!FIND.q) { el.textContent = ''; return; }
-  const n = FIND.pageHits.length;
-  el.textContent = n ? (FIND.cur + 1) + ' / ' + n : '无结果';
-}
-
-async function runFind(q) {
-  FIND.q = q.trim();
-  FIND.cur = -1;
-  if (!FIND.q) {
-    FIND.pageHits = [];
-    updateFindCount();
-    hideHighlights();
-    return;
-  }
-  await buildFindIndex();
-  if (FIND.pageHits.length) {
-    FIND.cur = 0;
-    await gotoFindHit(0);
-  } else {
-    updateFindCount();
-    hideHighlights();
-  }
-}
-
-async function stepFind(delta) {
-  if (!FIND.pageHits.length) return;
-  const n = FIND.pageHits.length;
-  FIND.cur = (FIND.cur + delta + n) % n;
-  await gotoFindHit(FIND.cur);
-}
-
-async function gotoFindHit(i) {
-  const hit = FIND.pageHits[i];
-  if (!hit) return;
-  // 连续滚动：跳到那一页（可能还没渲染，scrollToPage 会先建容器）
-  if (S.pdf.page !== hit.page || !S.pdf.pages.has(hit.page)) {
-    scrollToPage(hit.page);
-    // 等那页渲染完才能定位高亮
-    await renderPdfPage(hit.page);
-  }
-  updateFindCount();
-  await drawHighlights();
-}
-
-/*
- * 高亮命中位置。
- * pdf.js 给的 item.transform 是 [a,b,c,d,e,f]，e/f 是文字基线坐标。
- * 我们按 item 的宽高估算一个矩形，够用且不精确（字号/行距有误差）。
- */
-async function drawHighlights() {
-  clearHighlightLayer();
-  if (FIND.cur < 0 || !FIND.pageHits.length) return;
-  const hit = FIND.pageHits[FIND.cur];
-
-  const doc = S.pdf.doc;
-  if (!doc) return;
-  const stage = $('pdf-stage');
-  if (!stage) return;
-  const rec = S.pdf.pages.get(hit.page);
-  // 那页还没渲染出来 -> 没法定位（等它渲染完会再调一次）
-  if (!rec || !rec.rendered) return;
-  const page = await doc.getPage(hit.page);
-  const tc = await page.getTextContent();
-
-  /*
-   * 坐标换算（这块容易写错，务必看清）：
-   *   PDF 用户空间：原点左下，y 向上，单位 pt
-   *   canvas：原点左上，y 向下
-   *   paintPdf 里 canvas.style.height = page.getViewport({scale:S.pdf.scale}).height
-   *                      = pdfHeight * s
-   *   所以 CSS 像素 = PDF 用户空间 * s
-   *
-   *   top = (pdfHeight - y - fontH) * s
-   *       ↑ PDF 里 y 是基线（从底部算），要翻到顶部坐标系
-   *       ↑ 减fontH 让框顶贴住字顶（基线在字底）
-   *       ↑ 乘 s 因为 CSS 尺寸是缩放后的
-   *
-   * 注意：不能用 vp.height 再除以 s —— vp = getViewport({scale:s}) 里
-   * vp.height 已经是 pdfHeight * s 了，再除 s 才回到 PDF 空间。
-   * 那样写虽然数值接近，但语义混乱、容易在换 scale 时算错。
-   */
-  const sc = S.pdf.scale || 1;
-  const pdfH = page.view ? Math.abs(page.view[3] - page.view[1]) : 842;
-  const vp = page.getViewport({ scale: sc });
-  const layer = $('pdf-highlight');
-  if (!layer) return;
-
-  /*
-   * ★ 连续滚动模式下的坐标换算，和之前单canvas 时不同：
-   *
-   *   高亮层是盖在 .pdf-stage 上的（不是盖在某个 canvas 上），
-   *   所以要把「页内坐标」加上两个偏移：
-   *     ① 垂直：页在 .pdf-pages 里的位置 rec.wrap.offsetTop
-   *        + .pdf-stage 的 padding-top（12px）
-   *        - .pdf-stage 当前的 scrollTop
-   *        ↑ 最后减scrollTop 是因为层跟着视口走，不跟着内容走
-   *     ② 水平：页在 .pdf-pages 里是居中的（align-items:center），
-   *        左边距 = (stage 可视宽 - 页宽) / 2
-   *        + .pdf-stage 的 padding-left（10px）
-   *        - stage.scrollLeft
-   */
-  const stageRect = stage.getBoundingClientRect();
-  const wrapRect = rec.wrap.getBoundingClientRect();
-  // 用 getBoundingClientRect 的差值最稳：自动包含 padding、居中、已滚动量
-  const originX = wrapRect.left - stageRect.left;
-  const originY = wrapRect.top - stageRect.top;
-
-  // 层铺满整个 stage（而不是只盖一页）
-  layer.style.width = stage.clientWidth + 'px';
-  layer.style.height = stage.clientHeight + 'px';
-
-  let cursor = 0;
-
-  for (const item of tc.items) {
-    const s = item.str;
-    const start = cursor;
-    const end = cursor + s.length;
-    cursor = end;
-
-    const overlapStart = Math.max(start, hit.index);
-    const overlapEnd = Math.min(end, hit.index + hit.len);
-    if (overlapStart >= overlapEnd) continue;
-
-    const fracStart = (overlapStart - start) / Math.max(1, s.length);
-    const fracEnd = (overlapEnd - start) / Math.max(1, s.length);
-
-    const tr = item.transform;
-    // 文字基线坐标（PDF 空间，y 向上）
-    const fontH = Math.hypot(tr[2], tr[3]) || 10;
-    const x = tr[4];
-    const yTop = tr[5] + fontH * 0.75;   // 字顶约在基线上方 0.75em
-
-    // 粗略估算文字宽度：CJK 接近 1em，西文约 0.5em
-    const cjk = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(s);
-    const perChar = cjk ? fontH * 0.95 : fontH * 0.5;
-    const itemW = s.length * perChar;
-
-    const box = document.createElement('div');
-    box.className = 'pdf-hl';
-    // 页内坐标 * 缩放 + 页的视口内原点
-    box.style.left = (originX + (x + itemW * fracStart) * sc) + 'px';
-    box.style.top = (originY + (pdfH - yTop) * sc) + 'px';
-    box.style.width = Math.max(4, itemW * (fracEnd - fracStart) * sc) + 'px';
-    box.style.height = (fontH * 1.2 * sc) + 'px';
-    layer.appendChild(box);
-  }
-}
-
-function clearHighlightLayer() {
-  const layer = $('pdf-highlight');
-  if (layer) layer.innerHTML = '';
-}
-
-function hideHighlights() {
-  clearHighlightLayer();
-}
-
 // ---------------------------------------------------------------- PDF 书签
 //
 // 书签必须持久化，否则关掉页面就没了 —— 用 localStorage。
@@ -1977,10 +1571,8 @@ function hideHighlights() {
 
 const MARKS = { data: [] };
 
-/* ---- Word 专用的两个状态 ---- */
+/* ---- Word 书签状态 ---- */
 
-//查找：结构与 PDF 的 FIND 平行，但存的是 DOM 节点而不是页码
-const OFIND = { q: '', hits: [], cur: -1 };
 // 书签：记滚动百分比（Word 没有页码）
 const OFFMARKS = { data: [] };
 
@@ -2180,22 +1772,9 @@ function destroyPdf() {
   S.pdf.renderedUpTo = 0;
   const host = $('pdf-pages');
   if (host) host.innerHTML = '';
-  // 清查找与高亮（DOM 可能还没建好，所以逐个判存在）
-  FIND.q = '';
-  FIND.pageHits = [];
-  FIND.cur = -1;
-  FIND.building = false;
-  const hl = $('pdf-highlight');
-  if (hl) hl.innerHTML = '';
-  const box = $('pdf-find-input');
-  if (box) box.value = '';
 
-  // Word 侧同样要清：查找高亮是插在 DOM 里的 <mark>，
-  // 不清的话下次打开会看到一堆残留高亮。
-  closeOfficeFind();
   $('office-marks').hidden = true;
   OFFMARKS.data = [];
-  clearOfficeHighlights();
 }
 
 function lock(clearPw = true) {
@@ -2207,8 +1786,11 @@ function lock(clearPw = true) {
   hideViewers();
   hideLoading();
   destroyPdf();
-  if (S.idleTimer) clearTimeout(S.idleTimer);
+  if (S.idleTimer) { clearTimeout(S.idleTimer); S.idleTimer = null; }
+  // 倒计时的 interval 也要停：上锁后它还会每秒往 TIMER 写一次
+  if (S.idleTick) { clearInterval(S.idleTick); S.idleTick = null; }
   TIMER.hidden = true;
+  TIMER.classList.remove('is-urgent');
   PWD.value = '';
   VAULT.hidden = true;
   GATE.hidden = false;
@@ -2240,23 +1822,54 @@ function backToList() {
   $('empty-hint').hidden = false;
 }
 
+/**
+ * 重置空闲倒计时。
+ *
+ * ⚠️ 这里踩过一个很典型的坑（2026-10-04 修）：
+ *   resetIdle 挂在 click / keydown / touchstart 上，调用极其频繁。
+ *   原实现每次都新建一个 setInterval，但**从不清理上一个**，
+ *   而清理用的 setTimeout 只在 IDLE_MS+2000 之后才跑。
+ *   → 每点一次屏幕就多一个 interval 同时往同一个元素写 textContent，
+ *     显示的数字会在几个不同 deadline 之间来回跳（肉眼看到"时间在乱跳"），
+ *     而且这些 interval 一直跑到 10 分钟后才各自结束。
+ *
+ * 正确做法：interval 也存进状态，每次 reset 先 clearInterval 再建新的。
+ */
 function resetIdle() {
+  // 无论开关状态如何，先把上一次的 interval 停掉
+  if (S.idleTick) { clearInterval(S.idleTick); S.idleTick = null; }
+  if (S.idleTimer) { clearTimeout(S.idleTimer); S.idleTimer = null; }
+
   if (!REMEMBER.checked) { TIMER.hidden = true; return; }
-  if (S.idleTimer) clearTimeout(S.idleTimer);
   const deadline = Date.now() + IDLE_MS;
 
   S.idleTimer = setTimeout(() => {
+    S.idleTimer = null;
     if (Date.now() >= deadline) { lock(); gateMsg('长时间无操作，已自动上锁。', 'warn'); }
   }, IDLE_MS);
 
-  const tick = setInterval(() => {
-    const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-    TIMER.hidden = false;
-    TIMER.textContent = Math.floor(left / 60) + ':' +
-      String(left % 60).padStart(2, '0') + ' 后自动上锁';
-    if (left <= 0) clearInterval(tick);
-  }, 1000);
-  setTimeout(() => clearInterval(tick), IDLE_MS + 2000);
+  // 立即刷新一次，别等 1 秒后才出现
+  paintCountdown(deadline);
+  S.idleTick = setInterval(() => paintCountdown(deadline), 1000);
+}
+
+/** 把「还剩多少秒」画成 mm:ss。到点就隐藏，不留在 0:00。 */
+function paintCountdown(deadline) {
+  const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+  if (left <= 0) {
+    // 即将上锁（或已经上锁），别显示 "0:00后自动上锁" 卡在那儿
+    TIMER.hidden = true;
+    TIMER.classList.remove('is-urgent');
+    return;
+  }
+  const mm = Math.floor(left / 60);
+  const ss = String(left % 60).padStart(2, '0');
+  TIMER.hidden = false;
+  // 分钟数可能超过 99（如果以后把 IDLE_MS 调大），别溢出
+  TIMER.textContent = mm + ':' + ss + ' 后自动上锁';
+  TIMER.title = '距自动上锁还有 ' + mm + ' 分 ' + ss + ' 秒（任意操作都会重置）';
+  // 最后一分钟换个颜色，别让人被突然上锁吓到
+  TIMER.classList.toggle('is-urgent', left <= 60);
 }
 
 // ---------------------------------------------------------------- 事件
@@ -2651,12 +2264,15 @@ $('pdf-zoom-out').addEventListener('click', () => pdfZoom(1 / 1.2));
 //
 // ★ 拖动时**不重渲染**，松手才跳页。
 //   input 事件在拖动中会连续触发（每像素一次），
-//   每次都 await paintPdf()（canvas 渲染 + 查找高亮重算）会把主线程卡死。
+//   每次都 await paintPdf()（canvas 逐页重绘）会把主线程卡死。
 //   现在拖动中只记下目标页，松手（change）才执行。
 $('pdf-seek').addEventListener('input', (e) => {
   isSeeking = true;
   const n = Number(e.target.value) || 1;
   $('pdf-page').textContent = n + ' / ' + S.pdf.numPages;
+  // 拖动中同步底部进度条的页码标签（不触发跳转，避免 canvas 重渲染）
+  const lab = $('pdf-progress-val');
+  if (lab) lab.textContent = n + ' / ' + S.pdf.numPages;
   if (seekRaf) cancelAnimationFrame(seekRaf);
   seekRaf = requestAnimationFrame(() => { seekRaf = 0; });
 });
@@ -2722,42 +2338,11 @@ $('office-seek').addEventListener('input', (e) => {
   const stage = $('office-stage');
   if (!stage) return;
   const p = Math.min(100, Math.max(0, Number(e.target.value) || 0));
+  // 拖动时立刻更新标签，让用户看到当前位置（不必等滚动事件）
+  const lab = $('office-progress-val');
+  if (lab) lab.textContent = Math.round(p) + '%';
   const max = stage.scrollHeight - stage.clientHeight;
   if (max > 0) stage.scrollTop = (p / 100) * max;
-});
-
-// ---- Word 查找
-const officeFindInput = $('office-find-input');
-let officeFindTimer = null;
-officeFindInput.addEventListener('input', () => {
-  clearTimeout(officeFindTimer);
-  // 停顿 300ms 才检索：每敲一个字就全文扫一遍会明显卡
-  officeFindTimer = setTimeout(() => runOfficeFind(officeFindInput.value), 300);
-});
-officeFindInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    clearTimeout(officeFindTimer);
-    if (OFIND.hits.length) stepOfficeFind(e.shiftKey ? -1 : 1);
-    else runOfficeFind(officeFindInput.value);
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    closeOfficeFind();
-    $('office-find-toggle').focus();
-  }
-});
-$('office-find-prev').addEventListener('click', () => stepOfficeFind(-1));
-$('office-find-next').addEventListener('click', () => stepOfficeFind(1));
-$('office-find-close').addEventListener('click', closeOfficeFind);
-$('office-find-toggle').addEventListener('click', () => {
-  const bar = $('office-find');
-  bar.hidden = !bar.hidden;
-  if (bar.hidden) {
-    closeOfficeFind();
-  } else {
-    officeFindInput.focus();
-    officeFindInput.select();
-  }
 });
 
 // ---- Word 书签
@@ -2771,47 +2356,6 @@ $('office-mark-add').addEventListener('click', addOfficeMark);
 $('office-mark-clear').addEventListener('click', clearOfficeMarks);
 
 // ---- 记住上次读到的位置：离开文档时保存
-
-// ---- PDF 查找
-const findInput = $('pdf-find-input');
-let findTimer = null;
-findInput.addEventListener('input', () => {
-  clearTimeout(findTimer);
-  // 输入停顿 300ms 才检索，避免每敲一个字就全文扫一遍
-  findTimer = setTimeout(() => runFind(findInput.value), 300);
-});
-findInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    clearTimeout(findTimer);
-    if (FIND.pageHits.length) stepFind(e.shiftKey ? -1 : 1);
-    else runFind(findInput.value);
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    closeFind();
-  }
-});
-$('pdf-find-prev').addEventListener('click', () => stepFind(-1));
-$('pdf-find-next').addEventListener('click', () => stepFind(1));
-$('pdf-find-close').addEventListener('click', closeFind);
-$('pdf-find-toggle').addEventListener('click', () => {
-  const bar = $('pdf-find');
-  bar.hidden = !bar.hidden;
-  if (bar.hidden) { closeFind(); } else { findInput.focus(); findInput.select(); }
-});
-
-function closeFind() {
-  const bar = $('pdf-find');
-  if (bar) bar.hidden = true;
-  FIND.q = '';
-  FIND.pageHits = [];
-  FIND.cur = -1;
-  const box = $('pdf-find-input');
-  if (box) box.value = '';
-  const cnt = $('pdf-find-count');
-  if (cnt) cnt.textContent = '';
-  hideHighlights();
-}
 
 // ---- PDF 书签
 $('pdf-mark-toggle').addEventListener('click', () => {
@@ -2856,25 +2400,12 @@ document.addEventListener('keydown', (e) => {
 
   if (VAULT.hidden) return;
 
-  // ---- Word / PDF 里按 Ctrl+F（Cmd+F）打开查找
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-    if (!$('office-view').hidden) {
-      e.preventDefault();
-      const bar = $('office-find');
-      bar.hidden = false;
-      officeFindInput.focus();
-      officeFindInput.select();
-      return;
-    }
-    if (!$('pdf-view').hidden) {
-      e.preventDefault();
-      const bar = $('pdf-find');
-      bar.hidden = false;
-      findInput.focus();
-      findInput.select();
-      return;
-    }
-  }
+  /*
+   * 注：这里**故意不拦Ctrl+F**。
+   * 自建查找已删除，但浏览器/系统自带的查找（Ctrl+F）还能用 ——
+   * 对 PDF 无效（文字在canvas 里），但对 Word 和文本预览有效。
+   * 不 preventDefault 就是把它留给浏览器。
+   */
 
   if (e.key === 'Escape') {
     if (S.current) backToList();
@@ -2968,6 +2499,14 @@ PWD.focus();
     gateMsg('记住的密码已失效，请重新输入。', 'warn');
   }
 })();
+
+// 「本会话保持解锁」开关：切换后倒计时必须立刻跟着变
+// （勾上 → 立刻开始 10:00；取消 → 立刻隐藏，不是等下一次点击才生效）
+if (REMEMBER) {
+  REMEMBER.addEventListener('change', () => {
+    resetIdle();
+  });
+}
 
 // 勾选状态变化时给即时反馈：取消勾选就立刻清掉已存的
 if (REMEMBER_PW) {

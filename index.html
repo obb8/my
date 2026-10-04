@@ -158,19 +158,8 @@
         <div class="viewer-bar">
           <span id="pdf-name" class="viewer-name"></span>
           <span class="spacer"></span>
-          <button class="btn-ghost" id="pdf-find-toggle" type="button">查找</button>
           <button class="btn-ghost" id="pdf-mark-toggle" type="button">书签</button>
           <button class="btn-ghost" data-act="dl" type="button">下载</button>
-        </div>
-
-        <!-- 查找栏：全文搜索 + 上下跳结果 -->
-        <div class="pdf-find" id="pdf-find" hidden>
-          <input id="pdf-find-input" class="pdf-find-input" type="search"
-                 placeholder="在文档中查找…" autocomplete="off">
-          <span id="pdf-find-count" class="pdf-find-count"></span>
-          <button class="btn-ghost" id="pdf-find-prev" type="button" aria-label="上一个">‹</button>
-          <button class="btn-ghost" id="pdf-find-next" type="button" aria-label="下一个">›</button>
-          <button class="btn-ghost" id="pdf-find-close" type="button" aria-label="关闭">×</button>
         </div>
 
         <!-- 书签面板：可添加/跳转/删除，保存在浏览器本地 -->
@@ -199,17 +188,6 @@
         </div>
 
         <!--
-          阅读进度条：可拖动 / 可点按跳转。
-          role="slider" 让读屏软件能识别成滑块，键盘 ←→ 也能操作。
-        -->
-        <div class="pdf-progress" id="pdf-progress">
-          <input id="pdf-seek" class="pdf-seek" type="range"
-                 min="1" max="1" value="1" step="1"
-                 aria-label="跳转到指定页">
-          <div class="pdf-progress-flags" id="pdf-progress-flags"
-               aria-hidden="true"></div>
-        </div>
-        <!--
           连续滚动阅读：每页一个 <div class="pdf-page"> 包一个 canvas。
           ★ 不再是单canvas —— 一次一页没法连续滚。
             .pdf-stage 固定高度（flex:1 + overflow:auto），
@@ -218,8 +196,20 @@
         -->
         <div class="pdf-stage" id="pdf-stage">
           <div class="pdf-pages" id="pdf-pages"></div>
-          <!-- 查找高亮层：浮在页面上方，跨页共用一个 -->
-          <div class="pdf-highlight" id="pdf-highlight"></div>
+        </div>
+
+        <!--
+          阅读进度条：放在阅读框**下方**，与 Word 侧位置一致。
+          可拖动 / 可点按跳转；书签以小旗标在轨道上。
+          role="slider" 让读屏软件能识别成滑块，键盘 ←→ 也能操作。
+        -->
+        <div class="pdf-progress pdf-progress-bottom" id="pdf-progress">
+          <span class="pdf-progress-val" id="pdf-progress-val">1 / 1</span>
+          <input id="pdf-seek" class="pdf-seek" type="range"
+                 min="1" max="1" value="1" step="1"
+                 aria-label="跳转到指定页">
+          <div class="pdf-progress-flags" id="pdf-progress-flags"
+               aria-hidden="true"></div>
         </div>
       </div>
 
@@ -228,7 +218,6 @@
         <div class="viewer-bar">
           <span id="office-name" class="viewer-name"></span>
           <span class="spacer"></span>
-          <button class="btn-ghost" id="office-find-toggle" type="button">查找</button>
           <button class="btn-ghost" id="office-mark-toggle" type="button">书签</button>
           <button class="btn-ghost" id="office-toc-toggle" type="button"
                   aria-expanded="false">目录</button>
@@ -239,16 +228,6 @@
                     aria-label="增大字号">A+</button>
           </div>
           <button class="btn-ghost" data-act="dl" type="button">下载</button>
-        </div>
-
-        <!-- Word 查找：全文搜索 + 上下跳 + 高亮 -->
-        <div class="pdf-find" id="office-find" hidden>
-          <input id="office-find-input" class="pdf-find-input" type="search"
-                 placeholder="在文档中查找…" autocomplete="off">
-          <span id="office-find-count" class="pdf-find-count"></span>
-          <button class="btn-ghost" id="office-find-prev" type="button" aria-label="上一个">‹</button>
-          <button class="btn-ghost" id="office-find-next" type="button" aria-label="下一个">›</button>
-          <button class="btn-ghost" id="office-find-close" type="button" aria-label="关闭">×</button>
         </div>
 
         <!-- Word 书签：按滚动位置记录，点击可跳回 -->
@@ -278,7 +257,8 @@
         </div>
 
         <!-- Word 阅读进度：拖动跳转 + 百分比 -->
-        <div class="pdf-progress" id="office-progress">
+        <div class="pdf-progress pdf-progress-bottom" id="office-progress">
+          <span class="pdf-progress-val" id="office-progress-val">0%</span>
           <input id="office-seek" class="pdf-seek" type="range"
                  min="0" max="100" value="0" step="0.1"
                  aria-label="跳转到文档任意位置">
