@@ -50,9 +50,12 @@
 
     <!-- 顶栏 -->
     <header class="topbar">
-      <!-- 桌面端：折叠/展开左侧目录。阅读时折叠，阅读区能占满宽度 -->
+      <!-- 折叠/展开左侧目录。
+           桌面端：挤占宽度（阅读区让出一格）。
+           手机端：抽屉式浮在阅读区之上（不挤宽度），见 .sidebar-drawer。 -->
       <button id="sidebar-toggle" class="icon-btn sidebar-toggle" type="button"
-              aria-label="折叠文件目录" title="折叠/展开文件目录">
+              aria-label="折叠文件目录" title="折叠/展开文件目录"
+              aria-expanded="true" aria-controls="sidebar">
         <span aria-hidden="true">☰</span>
       </button>
       <button id="back-btn" class="icon-btn" type="button" hidden aria-label="返回">
@@ -81,10 +84,22 @@
   </div>
 
   <main class="vault-main">
+    <!--
+      抽屉遮罩：仅手机端出现。
+      盖在阅读区上面，点它收起目录 —— 抽屉开着时不能点到后面的内容，
+      这是"浮层"该有的行为（不挡住的话用户会误以为点到的是正文）。
+    -->
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+
     <!-- 文件列表（仅文件标签可见） -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-head">
         <input id="filter" class="filter" type="search" placeholder="筛选文件…" autocomplete="off">
+        <!-- 手机抽屉的关闭按钮：桌面端折叠时侧栏整个消失，用不到它 -->
+        <button id="drawer-close" class="icon-btn drawer-close" type="button"
+                aria-label="关闭文件目录" title="关闭">
+          <span aria-hidden="true">×</span>
+        </button>
       </div>
       <nav id="files-panel" class="groups"></nav>
     </aside>
@@ -141,14 +156,56 @@
         </div>
       </div>
 
-      <!-- 文本 -->
+      <!-- 文本：阅读体验与 Word 一致（书签 / 目录 / 字号 / 进度 / 记住位置） -->
       <div id="text-view" class="viewer" hidden>
         <div class="viewer-bar">
           <span id="text-name" class="viewer-name"></span>
           <span class="spacer"></span>
+          <button class="btn-ghost" id="text-mark-toggle" type="button">书签</button>
+          <button class="btn-ghost" id="text-toc-toggle" type="button"
+                  aria-expanded="false">目录</button>
+          <div class="tool-group">
+            <button class="tool-btn" id="text-font-down" type="button"
+                    aria-label="减小字号">A−</button>
+            <button class="tool-btn" id="text-font-up" type="button"
+                    aria-label="增大字号">A+</button>
+          </div>
           <button class="btn-ghost" data-act="dl" type="button">下载</button>
         </div>
-        <pre id="text-body" class="text-body"></pre>
+
+        <!-- 文本书签：按滚动位置记录，点击可跳回 -->
+        <div class="pdf-marks" id="text-marks" hidden>
+          <div class="marks-head">
+            <span class="marks-title">书签</span>
+            <button class="btn-ghost" id="text-mark-add" type="button">+ 标记当前位置</button>
+            <button class="btn-ghost" id="text-mark-clear" type="button">清空</button>
+            <button class="btn-ghost" id="text-mark-close" type="button" aria-label="关闭">×</button>
+          </div>
+          <ul class="marks-list" id="text-marks-list"></ul>
+          <p class="marks-hint" id="text-marks-hint"></p>
+        </div>
+
+        <!-- 目录：自动识别「第N章」「第N节」等标题行；识别不到就隐藏按钮 -->
+        <nav class="office-toc" id="text-toc" hidden aria-label="文本目录">
+          <div class="office-toc-head">
+            <span>目录</span>
+            <button class="btn-ghost" id="text-toc-close" type="button"
+                    aria-label="关闭目录">×</button>
+          </div>
+          <div class="office-toc-list" id="text-toc-list"></div>
+        </nav>
+
+        <div class="text-stage" id="text-stage">
+          <div id="text-body" class="text-body"></div>
+        </div>
+
+        <!-- 文本阅读进度：拖动跳转 + 百分比 -->
+        <div class="pdf-progress pdf-progress-bottom" id="text-progress">
+          <span class="pdf-progress-val" id="text-progress-val">0%</span>
+          <input id="text-seek" class="pdf-seek" type="range"
+                 min="0" max="100" value="0" step="0.1"
+                 aria-label="跳转到文档任意位置">
+        </div>
       </div>
 
       <!-- 图片统一走灯箱（#lightbox），这里不再需要独立的图片预览区 -->
@@ -278,9 +335,6 @@
       </div>
     </div>
   </main>
-
-  <!-- 手机端：打开文件后底部出现"返回列表" -->
-  <button id="list-fab" class="list-fab" type="button" hidden>文件列表</button>
 </section>
 
 <!-- ============ 3. 照片灯箱：点缩略图后弹出的小窗 ============ -->

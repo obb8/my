@@ -693,16 +693,23 @@ input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3p
 }
 .sidebar.is-hidden { display: none; }
 
-/* 桌面端的目录折叠按钮：只有宽屏才显示（手机上侧栏本来就会自动收起） */
+/*
+ * 目录开合按钮：宽屏和手机都要有，只是行为不同
+ *（宽屏=挤占宽度，手机=抽屉浮层，见文件末尾的 .drawer-backdrop 一节）。
+ */
 .sidebar-toggle {
-  display: none;
+  display: flex;
   flex-shrink: 0;
 }
-@media (min-width: 769px) {
-  .sidebar-toggle { display: flex; }
-}
-/* 侧栏被折叠：完全不占宽度，阅读区占满整屏 */
+/* 侧栏被折叠：完全不占宽度，阅读区占满整屏（宽屏行为） */
 body.sidebar-collapsed .sidebar { display: none; }
+
+/*
+ * 手机抽屉的关闭按钮 + 遮罩：只在窄屏生效，默认隐藏。
+ * 桌面端不用它们（侧栏折叠是"消失"，不是"浮起来"）。
+ */
+.drawer-close { display: none; }
+.drawer-backdrop { display: none; }
 
 /* ---------------------------------------------------------- 标签页（顶栏内） */
 
@@ -949,18 +956,71 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.text-body {
+/* ---------------------------------------------------------- 纯文本阅读
+ *
+ * 结构与 Word 完全一致：.text-stage 在框内滚，.text-body 负责排版。
+ * 正文用阅读字体（--sans），章节标题（.text-h）加粗放大。
+ * 代码/表格类内容靠 .text-pre 保持等宽（见 app.js 里的分流逻辑）。
+ */
+
+.text-stage {
   flex: 1;
-  min-height: 0;        /* ★ 让它在框内滚，而不是把页面撑高 */
-  margin: 0;
-  padding: 18px 20px;
+  min-height: 0;        /* ★ 在框内滚，不撑页面 */
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg-sub);
+}
+
+.text-body {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 26px 24px 60px;
+  background: var(--bg);
+  font-family: var(--sans);
+  font-size: 16px;      /* 与 Word 默认一致，A−/A+ 在 12–26 之间调 */
+  line-height: 1.9;     /* 长文比 Word 的 1.8 更松一点 */
+  color: var(--fg);
+  min-height: 100%;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* 章节标题：自动识别出来的「第N章」等 */
+.text-body .text-h {
+  font-weight: 600;
+  font-size: 1.16em;
+  line-height: 1.5;
+  margin: 30px 0 12px;
+  padding-left: 11px;
+  border-left: 3px solid var(--accent);
+  color: var(--fg);
+}
+/* 文档第一个标题不要顶那么大的上间距 */
+.text-body > .text-h:first-child {
+  margin-top: 0;
+}
+
+/* 正文段落：保留段首缩进两格（中文小说习惯） */
+.text-body .text-p {
+  margin: 0 0 4px;
+  text-indent: 2em;
+}
+/* 空行本身就是分隔，别再堆 margin */
+.text-body .text-p.is-blank {
+  text-indent: 0;
+  margin: 0;
+  min-height: 0.9em;
+}
+
+/* 需要保真对齐的内容（缩进、表格、代码）走等宽，不缩进 */
+.text-body .text-pre {
+  margin: 0 0 4px;
   font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 0.88em;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  -webkit-overflow-scrolling: touch;
+  color: var(--fg);
 }
 
 
@@ -1398,49 +1458,92 @@ kbd {
 .opaque-text b { color: var(--fg); font-weight: 500; }
 
 /* 手机端底部"返回列表" */
-.list-fab {
-  position: fixed;
-  left: 50%;
-  bottom: max(20px, env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  padding: 11px 26px;
-  font-size: 14px;
-  color: #fff;
-  background: var(--accent);
-  border: none;
-  border-radius: 24px;
-  box-shadow: 0 3px 14px rgba(0,0,0,0.2);
-  z-index: 30;
-  cursor: pointer;
-}
+/* （原 .list-fab 已删：抽屉方案里它永远hidden，是死代码）*/
 
 /* ---------------------------------------------------------- 手机端 */
 
 @media (max-width: 768px) {
-  .vault-main { flex-direction: column; }
-
   /*
-   * 移动端竖排：目录在上、阅读在下。
-   * ★ 页面已经锁死不滚了，所以这里必须**显式分配高度**——
-   *   不给 flex-basis，目录会按内容撑开（文件多时把阅读区挤没），
-   *   或者反过来阅读区占满、目录被压扁。
+   * 手机端：目录改成**抽屉浮层**，不再上下分割。
    *
-   * 目录给 34%，阅读区 66%；各自内部滚动。
-   * 目录在 56% 以上时变成可收起的抽屉（见 .sidebar 的媒体查询）。
+   * 旧做法是「目录占 34% 在上、阅读在下」，问题是两个区域都只有半屏高，
+   * 读长文档时正文被压得很难受，看目录也看不全。
+   *
+   * 现在：阅读区占满整屏，目录浮在上面（z-index 更高），
+   * 想要目录时点左上角 ☰ 拉出来。
+   *
+   * ★ .vault-main 必须保持 row（默认），侧栏靠 position 脱离文档流，
+   *   否则 flex 布局会把它当兄弟节点参与分配。
    */
-  .sidebar {
-    width: 100%;
-    flex: 0 0 34%;
-    min-height: 120px;      /* 再矮也要够点两行 */
-    max-height: 46%;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-    overflow: hidden;
-  }
+  .vault-main { position: relative; }
+
   .content {
     flex: 1 1 auto;
     min-height: 0;
   }
+
+  /* ---- 抽屉本体：固定在左侧，滑入/滑出 ---- */
+  .sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(84vw, 320px);
+    z-index: 40;/* 高于阅读区，盖在上面 */
+    border-right: 1px solid var(--line);
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.18);
+    transform: translateX(0);
+    transition: transform 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+    /* 关掉 body 上的 display:none —— 那是宽屏的折叠机制，
+       抽屉要靠 transform 滑出去，不能 display:none（那样没法过渡） */
+    display: flex !important;
+    will-change: transform;
+  }
+  /* 收起态：整体滑到屏幕左侧外。
+     保留在DOM 里（只是移出可视区），这样才能有过渡动画。 */
+  body.drawer-closed .sidebar { transform: translateX(-100%); }
+
+  /* 抽屉收起时不可聚焦/不可点：移出屏幕还不够，
+     键盘 Tab 还能进去、读屏还会念，必须显式关掉。 */
+  body.drawer-closed .sidebar {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  /* 打开时恢复。visibility 可过渡，等滑完再显示 */
+  body:not(.drawer-closed) .sidebar {
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 0.24s cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 0s;
+  }
+
+  /* ---- 遮罩：盖住阅读区，点它收起 ---- */
+  .drawer-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 35;/* 低于侧栏(40)、高于阅读区 */
+    background: rgba(0, 0, 0, 0.42);
+    opacity: 1;
+    transition: opacity 0.24s ease;
+  }
+  body.drawer-closed .drawer-backdrop {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* ---- 抽屉里的关闭按钮：手机上才需要 ---- */
+  .drawer-close {
+    display: flex;
+    flex-shrink: 0;
+    font-size: 20px;
+    color: var(--fg-muted);
+  }
+  .sidebar-head { display: flex; align-items: center; gap: 6px; }
+  .sidebar-head .filter { flex: 1; min-width: 0; }
+
+  /* 桌面端那套「折叠=消失」在手机上禁用，统一走 drawer-closed */
+  body.sidebar-collapsed .sidebar { display: flex !important; }
 
   /* 打开文件后给底部 FAB 让出空间 */
   .viewer { padding-bottom: 0; }
@@ -1461,7 +1564,7 @@ kbd {
   .office-body h2 { font-size: 18px; }
   .office-body h3 { font-size: 16px; }
 
-  .text-body { padding: 14px 16px; font-size: 14px; }
+  .text-body { padding: 18px 16px 48px; font-size: 15px; }
 
   /* PDF 页面贴边，减少浪费的空白 */
   .pdf-stage { padding: 8px 6px 90px; }
@@ -1476,7 +1579,7 @@ kbd {
 }
 
 @media print {
-  .topbar, .subbar, .sidebar, .pdf-tools, .list-fab, .viewer-bar .btn-ghost {
+  .topbar, .subbar, .sidebar, .pdf-tools, .viewer-bar .btn-ghost {
     display: none !important;
   }
   .office-body { max-width: none; padding: 0; }

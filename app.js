@@ -82,7 +82,6 @@ const LOCK_BTN = document.getElementById('lock-btn');
 const REMEMBER = document.getElementById('remember');
 const TIMER = document.getElementById('timer');
 const BACK_BTN = document.getElementById('back-btn');
-const LIST_FAB = document.getElementById('list-fab');
 const VIEW_TITLE = document.getElementById('view-title');
 const SIDEBAR = document.getElementById('sidebar');
 const CONTENT = document.getElementById('content');
@@ -587,6 +586,8 @@ function hideViewers() {
   for (const id of VIEW_IDS) $(id).hidden = true;
   $('empty-hint').hidden = false;
   $('office-body').innerHTML = '';
+  // txt 正文可能很大（几百 KB 的小说），切走时必须清掉别留在内存里
+  $('text-body').innerHTML = '';
   S.pdf.doc = null;
   S.pdf.page = 1;
   S.pdf.task = null;
@@ -607,46 +608,56 @@ function setView(name) {
 /*
  * 三种布局状态：
  *   wall  —— 照片墙：侧栏与预览区都藏起来，照片铺满整屏（用户要的）
- *   list  —— 文件列表：侧栏在左/上，预览区空着
- *   viewer—— 正在看某个文件：手机上侧栏收起，靠返回/FAB 回来
+ *   list  —— 文件列表：侧栏常驻（宽屏）或抽屉打开（窄屏），预览区空着
+ *   viewer—— 正在看某个文件：抽屉自动收起，阅读区占满
  */
 function applyLayout() {
   const photosMode = currentBucket() === 'photos';
   const viewing = !!S.current;
+  const mobile = detectMobile();
 
   // 照片墙模式：不要任何侧栏和空预览区
   SIDEBAR.classList.toggle('is-hidden', photosMode && !viewing);
   BODY.classList.toggle('is-wall', photosMode && !viewing);
 
   if (photosMode && !viewing) {
-    LIST_FAB.hidden = true;
     BACK_BTN.hidden = true;
+    setDrawerOpen(false);      // 照片墙没有目录，抽屉必须关着
     VIEW_TITLE.textContent = '照片';
     return;
   }
 
-  if (detectMobile()) {
-    SIDEBAR.classList.toggle('is-hidden', viewing);
-    LIST_FAB.hidden = !viewing;
+  if (mobile) {
+    /*
+     * 手机端：目录是抽屉。
+     * ★ 旧逻辑用的是 .is-hidden（display:none）—— 抽屉要能滑动过渡，
+     *   display:none 没法过渡，所以改成 body.drawer-closed + transform。
+     * ★ 打开文件时自动收起抽屉（用户选的方案）：
+     *   否则抽屉盖在正文上，正文没法读。
+     */
+    setDrawerOpen(!viewing, { auto: true });
     BACK_BTN.hidden = !viewing;
     VIEW_TITLE.textContent = viewing && S.current ? S.current.name : 'Private Vault';
   } else {
     // 桌面端：侧栏始终显示，但用户可以手动折叠（阅读长文档时占满宽度更舒服）
     SIDEBAR.classList.remove('is-hidden');
-    LIST_FAB.hidden = true;
+    setDrawerOpen(false);      // 宽屏不用抽屉，清掉状态免得残留
     BACK_BTN.hidden = true;
     VIEW_TITLE.textContent = 'Private Vault';
   }
 }
 
 /*
- * ---- 桌面端侧栏折叠
+ * ---- 侧栏：宽屏折叠 / 窄屏抽屉（两套机制共存）
  *
- * 只在宽屏生效。手机上侧栏本来就会在打开文件时收起，
- * 再加一个折叠按钮反而多余（那里用 LIST_FAB「文件列表」就够了）。
- *
- * 状态记在 localStorage —— 每次刷新都要重新点开太烦。
+ * 宽屏（>=769px）：侧栏是flex 兄弟节点，折叠= display:none，
+ *   状态记在 localStorage（刷新不用重新点开）。
+ * 窄屏（<=768px）：侧栏 position:absolute 浮在阅读区之上，
+ *   开= translateX(0)，关= translateX(-100%)，
+ *   靠 body.drawer-closed 这个类驱动。**不记 localStorage**——
+ *   手机上打开文件就该自动收起，每次进来都从"目录打开"开始才合理。
  */
+
 const SIDEBAR_KEY = 'pv.sidebar.collapsed';
 
 function loadSidebarPref() {
@@ -676,6 +687,59 @@ function setSidebarCollapsed(collapsed) {
   if (S.pdf.doc && !$('pdf-view').hidden) {
     S.pdf.scale = fitScale(S.pdf.doc);
     repaintAllPdfPages();
+  }
+}
+
+/* ---- 抽屉（仅窄屏生效） ---- */
+
+/** 抽屉当前是否打开。宽屏下恒为 false（宽屏不用抽屉）。 */
+function isDrawerOpen() {
+  return !BODY.classList.contains('drawer-closed');
+}
+
+/**
+ * 开关抽屉。
+ * @param {boolean} open
+ * @param {{auto?: boolean}} opt auto=true 表示"系统自动收起"，
+ *        不该抢走用户的光标焦点（否则点开文件后焦点莫名跳到 ☰）。
+ */
+function setDrawerOpen(open, opt) {
+  BODY.classList.toggle('drawer-closed', !open);
+
+  /*
+   * 遮罩用 hidden 属性控制显隐，但**不能立刻切**：
+   *   刚打开就 hidden=false，下一帧才有 opacity:1 才有过渡；
+   *   刚关闭就 hidden=true，display:none 会把滑出动画吃掉（直接消失）。
+   * 所以开= 立刻显示， 关 = 等过渡走完再隐藏。
+   */
+  const backdrop = $('drawer-backdrop');
+  if (backdrop) {
+    if (open) {
+      backdrop.hidden = false;
+    } else {
+      clearTimeout(backdrop._t);
+      // 260ms > CSS 里的 240ms 过渡，等动画结束再摘掉
+      backdrop._t = setTimeout(() => {
+        if (!isDrawerOpen()) backdrop.hidden = true;
+      }, 260);
+    }
+  }
+
+  // 同步 ☰ 的 aria-expanded，读屏才知道目录是开是关
+  const tgl = $('sidebar-toggle');
+  if (tgl) tgl.setAttribute('aria-expanded', String(open));
+
+  // 打开时把焦点移进抽屉（键盘/读屏用户能直接操作），
+  // 但「自动开合」时不要抢焦点。
+  if (open && !(opt && opt.auto)) {
+    const f = $('filter');
+    if (f) f.focus();
+  }
+  // 关闭时若焦点还在抽屉里，把它还给 ☰，
+  // 否则焦点掉到 body，键盘用户会"丢失位置"（再按 Tab 从头开始）。
+  if (!open && !(opt && opt.auto)) {
+    const t = $('sidebar-toggle');
+    if (t && SIDEBAR.contains(document.activeElement)) t.focus();
   }
 }
 
@@ -914,7 +978,7 @@ async function render(entry, data) {
   if (entry.kind === 'text') {
     setView('text-view');
     $('text-name').textContent = entry.name;
-    $('text-body').textContent = new TextDecoder().decode(data);
+    renderTextBody(decodeText(data));
 
   } else if (entry.kind === 'image') {
     // 照片放在 files/ 里的情况：也用灯箱看，不走独立的预览区
@@ -1561,6 +1625,345 @@ function scrollOfficeToPct(pct) {
   stage.scrollTo({ top: (pct / 100) * max, behavior: 'smooth' });
 }
 
+/* ================================================================
+ *  纯文本阅读（2026-10-04 加）
+ *
+ *  目标：txt 的阅读体验跟 Word 完全一致 ——
+ *    书签 / 目录 / 字号 A−/A+ / 进度条拖动 / 记住位置。
+ *
+ *  txt 是纯文本，没有 Word 的 h1/h2 标题概念，所以自己识别：
+ *    · 章节标题：「第一章」「第 1 回」「Chapter 2」「一、」「1.」等模式
+ *    · 识别不到就**把目录按钮藏起来**，不给一个点不开的面板
+ *      （和 buildOfficeToc 对无标题 Word 的处理一致）
+ *
+ *  排版分流：
+ *    · 章节标题 -> .text-h（加粗 + 左侧竖线）
+ *    · 缩进/制表符/代码感强的行-> .text-pre（等宽，保真不缩进）
+ *    · 其余正文 -> .text-p（首行缩进两格，中文小说习惯）
+ *  识别为 .text-pre 的行不参与目录，也不缩进。
+ * ================================================================ */
+
+/**
+ * 章节标题识别规则。顺序即优先级，从严到宽。
+ *
+ * ★ 捕获组一律排除句读（。！？，；：、）—— 否则
+ *   「第一章的内容其实是他打开盒子」这种正文句子会被当标题。
+ *   标题本来就不带句号，带了就不是标题。
+ * ★ 汉字数字用「零一二三四五六七八九十百千两」，含两（章节常见）。
+ */
+const TEXT_HEADING_RES = [
+  // 第 1 回 / 第十二章 / 第3节 —— 最典型的中文小说章节
+  /^\s*第\s*[0-9零一二三四五六七八九十百千两]+\s*[回章节卷部篇]\s*[:：、.\-—]?\s*([^。！？，；：、]{0,60})$/,
+  // Chapter 1 / CHAPTER II / chapter 3
+  /^\s*(?:chapter|chap\.?|part)\s*[0-9ivxlcdm]+\s*[:.\-—]?\s*([^。！？，；：、]{0,80})$/i,
+  // 卷一 / 上部 —— 单字层级
+  /^\s*[卷部篇]\s*[0-9零一二三四五六七八九十百千两]+\s*[:：、.\-—]?\s*([^。！？，；：、]{0,60})$/,
+  // 一、xxx / 二、xxx（顿号/句点枚举，且整行不长）
+  /^\s*[0-9零一二三四五六七八九十百千两]{1,4}\s*[、.．]\s*(\S[^。！？，；：、]{0,58})$/,
+];
+
+/**
+ * 是不是「需要保真、别缩进」的行。
+ * 判据：行首有缩进空白，或含制表符/全角空格 —— 这类行多半是
+ * 代码、表格、列表或刻意对齐的排版，等宽显示才不会错位。
+ */
+function isPreformattedLine(line) {
+  if (!line) return false;
+  // 行首就是空白（半角空格 / 制表符 / 全角空格 U+3000）
+  if (/^[ \t\u3000]/.test(line)) return true;
+  // 行内出现制表符
+  if (line.indexOf('\t') >= 0) return true;
+  return false;
+}
+
+/**
+ * 一行文本判成 { level, text } 标题，或返回 null。
+ *
+ * ★ 两个容易误判的坑（正文里真的会踩）：
+ *   ①「第一章的内容其实是他打开盒子」—— 以「第N章」开头但其实是正文句子。
+ *      靠下面的句读检查拦：标题里不该出现句号/逗号。
+ *   ②缩进的对齐行 / 列表项 —— 交给isPreformattedLine 拦，
+ *      在这里就拒掉（不只靠渲染层兜底，逻辑收在一处）。
+ */
+function matchTextHeading(line) {
+  if (!line) return null;
+  // 缩进/制表符行是对齐内容或列表项，不是章节
+  if (isPreformattedLine(line)) return null;
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  // 太长的行不可能是标题
+  if (trimmed.length > 70) return null;
+  // 有明显句读结尾的多半是正文（豁免「第N章」是标题本身，不带句号的情况）
+  if (/[。！？，；：,;!?]$/.test(trimmed) && !/^第\s*[0-9零一二三四五六七八九十百千两]+\s*[回章节]/.test(trimmed)) {
+    return null;
+  }
+  for (let i = 0; i < TEXT_HEADING_RES.length; i++) {
+    const m = trimmed.match(TEXT_HEADING_RES[i]);
+    if (m) {
+      const title = (m[1] || '').trim() || trimmed;
+      return { level: i + 1, text: title };
+    }
+  }
+  return null;
+}
+
+/** 解码字节为文本，顺手处理 UTF-8 BOM 和 UTF-16 BOM。 */
+function decodeText(data) {
+  const buf = new Uint8Array(data);
+  if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+    return new TextDecoder('utf-8').decode(buf.subarray(3));
+  }
+  if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
+    return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  }
+  if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) {
+    return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  }
+  return new TextDecoder('utf-8').decode(buf);
+}
+
+/**
+ * 渲染文本到 #text-body。
+ * 用 createElement逐行建节点，不用 innerHTML —— 文本内容不可信，
+ * 且小说里有大量< > & 之类字符，走innerHTML 必须转义，走 DOM 则天然安全。
+ */
+function renderTextBody(text) {
+  const body = $('text-body');
+  if (!body) return;
+  body.innerHTML = '';
+
+  // Windows 换行的 \r 会让 isPreformattedLine 误判，统一先切掉
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  const frag = document.createDocumentFragment();
+  const headings = [];
+  let sec = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (!line.trim()) {
+      const sp = document.createElement('div');
+      sp.className = 'text-p is-blank';
+      sp.appendChild(document.createElement('br'));
+      frag.appendChild(sp);
+      continue;
+    }
+
+    const h = matchTextHeading(line);
+    // 缩进行不认成标题（多半是对齐的列表项，不是章节）
+    if (h && !isPreformattedLine(line)) {
+      const el = document.createElement('h2');
+      el.className = 'text-h';
+      el.id = 'tsec-' + (sec++);
+      el.textContent = h.text;
+      el.dataset.level = String(h.level);
+      frag.appendChild(el);
+      headings.push({ id: el.id, text: h.text, level: h.level });
+      continue;
+    }
+
+    const el = document.createElement('div');
+    if (isPreformattedLine(line)) {
+      el.className = 'text-pre';
+    } else {
+      el.className = 'text-p';
+    }
+    el.textContent = line;
+    frag.appendChild(el);
+  }
+
+  body.appendChild(frag);
+
+  // 目录：识别不到就藏按钮（与 Word 无标题时的处理一致）
+  buildTextToc(headings);
+
+  // 换文档时载入该文档的文本书签
+  $('text-marks').hidden = true;
+  loadTextMarks();
+  renderTextMarks();
+  restoreTextPos();
+  initTextSeek();
+}
+
+/* ---------------------------------------------------------------- 文本目录 */
+
+function buildTextToc(items) {
+  const list = $('text-toc-list');
+  const btn = $('text-toc-toggle');
+  if (!list) return;
+
+  list.innerHTML = '';
+  if (!items.length) {
+    if (btn) btn.hidden = true;
+    return;
+  }
+  if (btn) btn.hidden = false;
+
+  for (const h of items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'office-toc-item lv' + Math.min(h.level, 4);
+    b.textContent = h.text;
+    b.title = h.text;
+    b.addEventListener('click', () => {
+      const el = document.getElementById(h.id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    list.appendChild(b);
+  }
+}
+
+/* ---------------------------------------------------------------- 文本进度 */
+
+let textTicking = false;
+
+function initTextSeek() {
+  const seek = $('text-seek');
+  if (!seek) return;
+  seek.value = '0';
+  seek.disabled = false;
+  textTicking = false;
+  const lab = $('text-progress-val');
+  if (lab) lab.textContent = '0%';
+}
+
+function textProgress() {
+  const stage = $('text-stage');
+  if (!stage) return 0;
+  // 可滚动距离为 0（内容不足一屏）时返回 0，避免除零
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max <= 0) return 0;
+  const p = stage.scrollTop / max;
+  return Math.min(100, Math.max(0, p * 100));
+}
+
+function syncTextSeek() {
+  const seek = $('text-seek');
+  if (seek) seek.value = String(textProgress());
+  syncTextProgressLabel();
+}
+
+function syncTextProgressLabel() {
+  const el = $('text-progress-val');
+  if (!el) return;
+  el.textContent = Math.round(textProgress()) + '%';
+}
+
+function restoreTextPos() {
+  const pos = loadReadPos('text');
+  const stage = $('text-stage');
+  if (!pos || !stage) return;
+  // 等布局稳定后再滚，否则 scrollHeight 还是 0
+  requestAnimationFrame(() => {
+    const max = stage.scrollHeight - stage.clientHeight;
+    if (max <= 0) return;
+    stage.scrollTop = (pos.value / 100) * max;
+    syncTextSeek();
+  });
+}
+
+/* ---------------------------------------------------------------- 文本书签 */
+
+/* ---- 文本书签状态 ---- */
+
+// 书签：记滚动百分比（txt 同样没有页码概念）
+const TXMARKS = { data: [] };
+
+// key 策略与 PDF / Word 书签一致（用 stableId，改密码或增删文件都不会错位）
+function textMarksKey() {
+  const f = S.current;
+  const key = (f && (f.stableId || f.id)) || 'unknown';
+  return 'pv-t-marks:' + key;
+}
+
+function loadTextMarks() {
+  try {
+    const raw = localStorage.getItem(textMarksKey());
+    TXMARKS.data = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(TXMARKS.data)) TXMARKS.data = [];
+    TXMARKS.data = TXMARKS.data.filter(
+      (m) => m && typeof m.pct === 'number' && isFinite(m.pct));
+  } catch (_) {
+    TXMARKS.data = [];
+  }
+}
+
+function saveTextMarks() {
+  try {
+    localStorage.setItem(textMarksKey(), JSON.stringify(TXMARKS.data));
+  } catch (_) {
+    /* 隐私模式，忽略 */
+  }
+}
+
+function renderTextMarks() {
+  const list = $('text-marks-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const data = TXMARKS.data.slice().sort((a, b) => a.at - b.at);
+  const cur = textProgress();
+
+  for (const m of data) {
+    const li = document.createElement('li');
+    li.className = 'marks-item';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'marks-jump';
+    btn.textContent = Math.round(m.pct) + '%';
+    // 当前滚动位置附近的书签高亮
+    if (Math.abs(m.pct - cur) < 3) btn.classList.add('is-current');
+    btn.addEventListener('click', () => scrollTextToPct(m.pct));
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'marks-del';
+    del.textContent = '×';
+    del.title = '删除';
+    del.addEventListener('click', () => {
+      TXMARKS.data = TXMARKS.data.filter((x) => x.at !== m.at);
+      saveTextMarks();
+      renderTextMarks();
+    });
+
+    li.append(btn, del);
+    list.appendChild(li);
+  }
+
+  const hint = $('text-marks-hint');
+  if (hint) {
+    hint.textContent = data.length
+      ? data.length + ' 个书签（本机保存，关掉页面也在）'
+      : '还没有书签。滚到想标记的位置，点「+ 标记当前位置」。';
+  }
+}
+
+function addTextMark() {
+  const pct = textProgress();
+  // 同一位置附近不重复加
+  if (TXMARKS.data.some((m) => Math.abs(m.pct - pct) < 2)) {
+    renderTextMarks();
+    return;
+  }
+  TXMARKS.data.push({ pct, at: Date.now() });
+  saveTextMarks();
+  renderTextMarks();
+}
+
+function clearTextMarks() {
+  TXMARKS.data = [];
+  saveTextMarks();
+  renderTextMarks();
+}
+
+function scrollTextToPct(pct) {
+  const stage = $('text-stage');
+  if (!stage) return;
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max <= 0) return;
+  stage.scrollTo({ top: (pct / 100) * max, behavior: 'smooth' });
+}
+
 
 // ---------------------------------------------------------------- PDF 书签
 //
@@ -1775,6 +2178,9 @@ function destroyPdf() {
 
   $('office-marks').hidden = true;
   OFFMARKS.data = [];
+
+  $('text-marks').hidden = true;
+  TXMARKS.data = [];
 }
 
 function lock(clearPw = true) {
@@ -1887,8 +2293,10 @@ $('gate-form').addEventListener('submit', async (e) => {
 
   try {
     await unlock(pw);
-    // 恢复侧栏折叠状态（在 renderList 之前，避免布局闪一下）
+    // 恢复侧栏状态（在 renderList 之前，避免布局闪一下）
+    //宽屏：恢复折叠偏好；窄屏：抽屉默认打开（不记偏好，见 setDrawerOpen 注释）
     if (loadSidebarPref()) BODY.classList.add('sidebar-collapsed');
+    if (detectMobile()) setDrawerOpen(true, { auto: true });
     // ★ 解锁成功了才考虑记住 —— 密码错的时候绝不能存，
     //   否则下次自动填一个错的，用户会以为密码坏了。
     if (REMEMBER_PW && REMEMBER_PW.checked) {
@@ -1927,13 +2335,80 @@ WALL_FILTER.addEventListener('input', renderList);
 // 排序改变时重画照片墙。change 而非 input（下拉框没有连续输入）
 if (WALL_SORT) WALL_SORT.addEventListener('change', renderList);
 BACK_BTN.addEventListener('click', backToList);
-LIST_FAB.addEventListener('click', backToList);
+//注：旧的 #list-fab（「文件列表」悬浮按钮）已删除——
+//     抽屉方案里它没有任何触发机会（applyLayout 恒置 hidden），
+//     职责由顶栏 ☰ 完全承担。留着就是永不触发的死代码。
 
-// ---- 桌面端侧栏折叠
+// ---- 侧栏开合：宽屏折叠 / 窄屏抽屉
 if ($('sidebar-toggle')) {
   $('sidebar-toggle').addEventListener('click', () => {
-    setSidebarCollapsed(!isSidebarCollapsed());
+    if (detectMobile()) {
+      setDrawerOpen(!isDrawerOpen());
+    } else {
+      setSidebarCollapsed(!isSidebarCollapsed());
+    }
   });
+}
+if ($('drawer-close')) {
+  $('drawer-close').addEventListener('click', () => setDrawerOpen(false));
+}
+if ($('drawer-backdrop')) {
+  // 点遮罩收起。放在捕获阶段：抽屉开着时正文不该被点到，
+  // 遮罩必须先于正文吃掉这次点击。
+  $('drawer-backdrop').addEventListener('click', () => setDrawerOpen(false));
+}
+
+/*
+ * 抽屉手势：左缘右滑打开 · 抽屉上左滑收起。
+ *
+ * 为什么只在「左缘」而不是整个屏幕左半边：
+ *   左半边是正文区域，手势和滚动/选中文字打架。
+ *   边缘 24px 是公认的「抽屉把手」位置，冲突最少。
+ */
+if (SIDEBAR) {
+  const EDGE = 24;          // 左缘把手宽度(px)
+  const SWIPE = 48;         // 判定为一次滑动的最小位移(px)
+  let sx = 0, sy = 0, tracking = false, fromEdge = false;
+
+  const isMobile = () => detectMobile();
+
+  // 左缘右滑 -> 打开
+  document.addEventListener('touchstart', (e) => {
+    if (!isMobile() || !e.touches.length) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    fromEdge = sx <= EDGE && !isDrawerOpen();
+    tracking = fromEdge;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!tracking || !e.touches.length) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = e.touches[0].clientY - sy;
+    // 横向为主才算是抽屉手势（纵向的应该是滚动）
+    if (Math.abs(dx) > SWIPE && Math.abs(dx) > Math.abs(dy) * 1.6 && dx > 0) {
+      setDrawerOpen(true);
+      tracking = false;
+    }
+  }, { passive: true });
+
+  // 抽屉上左滑 -> 收起
+  let tStartX = 0, tTracking = false;
+  SIDEBAR.addEventListener('touchstart', (e) => {
+    if (!isMobile() || !e.touches.length) return;
+    tStartX = e.touches[0].clientX;
+    tTracking = true;
+  }, { passive: true });
+  SIDEBAR.addEventListener('touchend', (e) => {
+    if (!tTracking) return;
+    tTracking = false;
+    const t = e.changedTouches && e.changedTouches[0];
+    if (!t) return;
+    // 已经在筛选框里横向拖动就别当成滑动（那是选文本）
+    const tag = (document.activeElement && document.activeElement.id) || '';
+    if (tag === 'filter') return;
+    if (tStartX - t.clientX > SWIPE) setDrawerOpen(false);
+  }, { passive: true });
 }
 
 TAB_PHOTOS.addEventListener('click', () => {
@@ -2355,6 +2830,76 @@ $('office-mark-close').addEventListener('click', () => { $('office-marks').hidde
 $('office-mark-add').addEventListener('click', addOfficeMark);
 $('office-mark-clear').addEventListener('click', clearOfficeMarks);
 
+/* ---- 文本：目录 / 字号 / 进度 / 书签（与 Word 一一对应） ---- */
+
+$('text-toc-close').addEventListener('click', () => {
+  $('text-toc').hidden = true;
+  $('text-toc-toggle').setAttribute('aria-expanded', 'false');
+});
+$('text-toc-toggle').addEventListener('click', () => {
+  const p = $('text-toc');
+  p.hidden = !p.hidden;
+  $('text-toc-toggle').setAttribute('aria-expanded', String(!p.hidden));
+});
+
+// ---- 文本字号（范围与 Word 一致：12–26px）
+const TEXT_FONT_MIN = 12;
+const TEXT_FONT_MAX = 26;
+const TEXT_FONT_DEFAULT = 16;
+function textFontStep(delta) {
+  const body = $('text-body');
+  if (!body) return;
+  const cur = parseFloat(body.style.fontSize)
+           || parseFloat(getComputedStyle(body).fontSize)
+           || TEXT_FONT_DEFAULT;
+  const next = Math.min(TEXT_FONT_MAX, Math.max(TEXT_FONT_MIN, cur + delta));
+  body.style.fontSize = next + 'px';
+  syncTextSeek();
+}
+$('text-font-up').addEventListener('click', () => textFontStep(1));
+$('text-font-down').addEventListener('click', () => textFontStep(-1));
+
+// ---- 文本滚动进度联动（rAF 节流：滚动事件很密集）
+$('text-stage').addEventListener('scroll', () => {
+  if (textTicking) return;
+  textTicking = true;
+  requestAnimationFrame(() => {
+    textTicking = false;
+    syncTextSeek();
+  });
+}, { passive: true });
+
+// 滚动停止后再记位置（滚动中不停写 localStorage 是浪费）
+let textSaveTimer = 0;
+$('text-stage').addEventListener('scroll', () => {
+  clearTimeout(textSaveTimer);
+  textSaveTimer = setTimeout(() => {
+    saveReadPos('text', textProgress());
+  }, 400);
+}, { passive: true });
+
+// ---- 文本进度条拖拽
+$('text-seek').addEventListener('input', (e) => {
+  const stage = $('text-stage');
+  if (!stage) return;
+  const p = Math.min(100, Math.max(0, Number(e.target.value) || 0));
+  // 拖动时立刻更新标签，让用户看到当前位置（不必等滚动事件）
+  const lab = $('text-progress-val');
+  if (lab) lab.textContent = Math.round(p) + '%';
+  const max = stage.scrollHeight - stage.clientHeight;
+  if (max > 0) stage.scrollTop = (p / 100) * max;
+});
+
+// ---- 文本书签
+$('text-mark-toggle').addEventListener('click', () => {
+  const p = $('text-marks');
+  p.hidden = !p.hidden;
+  if (!p.hidden) renderTextMarks();
+});
+$('text-mark-close').addEventListener('click', () => { $('text-marks').hidden = true; });
+$('text-mark-add').addEventListener('click', addTextMark);
+$('text-mark-clear').addEventListener('click', clearTextMarks);
+
 // ---- 记住上次读到的位置：离开文档时保存
 
 // ---- PDF 书签
@@ -2408,6 +2953,9 @@ document.addEventListener('keydown', (e) => {
    */
 
   if (e.key === 'Escape') {
+    // 手机端目录是抽屉，且解锁后默认展开 —— Esc 应当先关抽屉。
+    // 不加这条：没打开文件时按 Esc 会走到下面的 lock()，手误一下整个站被锁。
+    if (detectMobile() && isDrawerOpen()) { setDrawerOpen(false); return; }
     if (S.current) backToList();
     else if (currentBucket() === 'files') lock();
     // 照片墙是主界面，Esc 不该直接关掉整个网站（容易误触）
@@ -2480,6 +3028,7 @@ PWD.focus();
     await unlock(saved);
     // 不走 submit 处理器：这里已经解锁成功了
     if (loadSidebarPref()) BODY.classList.add('sidebar-collapsed');
+    if (detectMobile()) setDrawerOpen(true, { auto: true });
     GATE.hidden = true;
     VAULT.hidden = false;
     renderList();
