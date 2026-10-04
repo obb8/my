@@ -4,7 +4,7 @@
   "iterations": 600000,
   "cipher": "AES-256-GCM",
   "keyLength": 256,
-  "salt": "Nmkswyz5rbBUuwnS84Ux5w==",
+  "salt": "zpz2dhL0ZzJl75cKIcMdFg==",
   "magic": "VAULT1",
   "fileCount": 393,
   "photoCount": 386,
